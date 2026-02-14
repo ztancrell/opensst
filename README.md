@@ -2,6 +2,8 @@
 
 Open Starship Troopers — a fast, realistic Starship Troopers-inspired first-person shooter with **Euphoria-style physics-driven death animations**, built in Rust using wgpu for high-performance GPU rendering.
 
+**Development:** This project was developed with assistance from [Cursor](https://cursor.com) AI (code generation, refactoring, and tooling).
+
 ## Features
 
 ### Core Engine
