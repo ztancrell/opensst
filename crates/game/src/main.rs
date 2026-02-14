@@ -2101,6 +2101,7 @@ impl GameState {
                 health.take_damage(10000.0);
                 killed += 1;
             }
+            #[cfg(debug_assertions)]
             self.game_messages.warning(format!("[DEBUG] Killed {} entities", killed));
         }
 
@@ -2111,6 +2112,7 @@ impl GameState {
                 self.camera.transform.position = Vec3::new(0.0, y, 0.0);
                 self.player.position = self.camera.transform.position;
                 self.player_velocity = Vec3::ZERO;
+                #[cfg(debug_assertions)]
                 self.game_messages.info("[DEBUG] Teleported to origin");
             }
         }
@@ -5500,12 +5502,14 @@ impl GameState {
                                 engine_core::AIComponent::new(85.0, 2.5, 1.0),  // Extermination: large aggro = constant pressure
                             ));
                         }
+                        #[cfg(debug_assertions)]
                         self.game_messages.info("Spawned 10 debug bugs!");
                     }
 
                     if key == KeyCode::F2 && event.state.is_pressed() {
                         self.player.heal(50.0);
                         self.player.add_armor(25.0);
+                        #[cfg(debug_assertions)]
                         self.game_messages.info("Debug heal applied!");
                     }
 
@@ -5513,6 +5517,7 @@ impl GameState {
                     if key == KeyCode::F3 && event.state.is_pressed() {
                         self.debug.menu_open = !self.debug.menu_open;
                         if self.debug.menu_open {
+                            #[cfg(debug_assertions)]
                             self.game_messages.info("[DEBUG] Debug menu opened (Arrow keys + Enter)");
                         }
                     }
@@ -5535,10 +5540,13 @@ impl GameState {
                                 // Show feedback for the toggled item
                                 let items = self.debug.menu_items();
                                 if let Some((name, val)) = items.get(self.debug.selected) {
-                                    if name.starts_with("--") {
-                                        self.game_messages.info(format!("[DEBUG] {}", name.trim_matches('-').trim()));
-                                    } else {
-                                        self.game_messages.info(format!("[DEBUG] {} = {}", name, if *val { "ON" } else { "OFF" }));
+                                    #[cfg(debug_assertions)]
+                                    {
+                                        if name.starts_with("--") {
+                                            self.game_messages.info(format!("[DEBUG] {}", name.trim_matches('-').trim()));
+                                        } else {
+                                            self.game_messages.info(format!("[DEBUG] {} = {}", name, if *val { "ON" } else { "OFF" }));
+                                        }
                                     }
                                 }
                             }

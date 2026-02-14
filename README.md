@@ -106,19 +106,22 @@ Open Starship Troopers — a fast, realistic Starship Troopers-inspired first-pe
 # Ensure Rust is installed
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Linux dependencies
+# Linux dependencies (for audio)
 # Fedora: sudo dnf install alsa-lib-devel
 # Ubuntu: sudo apt install libasound2-dev
 
-# Build and run
-cd bug_horde_engine  # or your project directory
+# From the repo root (after cloning), build and run
 cargo run --release
 ```
+
+## Saves
+
+Progress is stored in **`opensst_save.ron`** in the current working directory (where you run the binary). It holds universe seed, current star system, and galactic war state (liberation, kills, extractions, major orders). The game loads it on startup and saves on successful extraction.
 
 ## Project Structure
 
 ```
-bug_horde_engine/   # or opensst/
+opensst/
 ├── crates/
 │   ├── engine_core/     # Core types, transforms, components
 │   ├── renderer/        # wgpu rendering, cameras, meshes
