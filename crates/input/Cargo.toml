@@ -1,0 +1,10 @@
+[package]
+name = "input"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+glam.workspace = true
+winit.workspace = true
+log.workspace = true

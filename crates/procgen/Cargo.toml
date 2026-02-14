@@ -1,0 +1,13 @@
+[package]
+name = "procgen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+noise.workspace = true
+rand.workspace = true
+log.workspace = true
+anyhow.workspace = true

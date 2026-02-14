@@ -1,0 +1,21 @@
+# Rust build output
+/target/
+
+# Cargo lock is often committed for binaries; uncomment to ignore
+# Cargo.lock
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug / local
+*.log
+.env
+.env.local

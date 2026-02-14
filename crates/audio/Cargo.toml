@@ -1,0 +1,12 @@
+[package]
+name = "audio"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+glam.workspace = true
+kira.workspace = true
+log.workspace = true
+anyhow.workspace = true
+mint = "0.5"

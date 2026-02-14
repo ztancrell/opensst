@@ -1,0 +1,29 @@
+[package]
+name = "game"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "opensst"
+path = "src/main.rs"
+
+[dependencies]
+engine_core.workspace = true
+renderer.workspace = true
+physics.workspace = true
+audio.workspace = true
+input.workspace = true
+procgen.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+hecs.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+rapier3d.workspace = true
+rand.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"

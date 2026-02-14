@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/engine_core",
+    "crates/renderer",
+    "crates/physics",
+    "crates/audio",
+    "crates/input",
+    "crates/procgen",
+    "crates/game",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Zach"]
+license = "MIT"
+
+[workspace.dependencies]
+# Math
+glam = { version = "0.29", features = ["bytemuck"] }
+bytemuck = { version = "1.19", features = ["derive"] }
+
+# Rendering
+wgpu = "23"
+winit = "0.30"
+pollster = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+gltf = "1.4"
+
+# ECS
+hecs = "0.10"
+
+# Physics
+rapier3d = { version = "0.22", features = ["simd-stable"] }
+
+# Audio
+kira = "0.9"
+
+# Procedural Generation
+noise = "0.9"
+rand = "0.8"
+
+# Utilities
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Internal crates
+engine_core = { path = "crates/engine_core" }
+renderer = { path = "crates/renderer" }
+physics = { path = "crates/physics" }
+audio = { path = "crates/audio" }
+input = { path = "crates/input" }
+procgen = { path = "crates/procgen" }
+game = { path = "crates/game" }
+
+# ── Build profiles ──────────────────────────────────────────────────────
+# Dev: keep game code at opt-level 0 (fast compile) but optimise every
+# dependency (rapier3d, wgpu, noise, rand…) at opt-level 2 so they run
+# at near-release speed without slowing incremental rebuilds.
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Release: full optimisation + LTO for shipping builds.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

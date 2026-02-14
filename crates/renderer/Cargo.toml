@@ -1,0 +1,17 @@
+[package]
+name = "renderer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+image.workspace = true
+gltf.workspace = true
+log.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
