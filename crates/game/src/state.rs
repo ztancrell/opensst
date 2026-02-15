@@ -17,6 +17,8 @@ pub(crate) struct DebugSettings {
     pub menu_open: bool,
     /// Currently selected menu item index.
     pub selected: usize,
+    /// Show the top-left debug text block (FPS, XYZ, system, planet, etc.). When false, hides it to save screen space.
+    pub show_debug_overlay: bool,
     /// Noclip free-fly camera (no gravity/collision).
     pub noclip: bool,
     /// God mode: player takes no damage.
@@ -46,6 +48,7 @@ impl DebugSettings {
         Self {
             menu_open: false,
             selected: 0,
+            show_debug_overlay: true,
             noclip: false,
             god_mode: false,
             no_bug_spawns: false,
@@ -62,6 +65,7 @@ impl DebugSettings {
 
     pub fn menu_items(&self) -> Vec<(&str, bool)> {
         vec![
+            ("Show Debug Overlay", self.show_debug_overlay),
             ("Noclip (free-fly)", self.noclip),
             ("God Mode", self.god_mode),
             ("No Bug Spawns", self.no_bug_spawns),
@@ -80,25 +84,26 @@ impl DebugSettings {
     }
 
     pub fn menu_item_count(&self) -> usize {
-        14
+        15
     }
 
     pub fn toggle_selected(&mut self) {
         match self.selected {
-            0 => self.noclip = !self.noclip,
-            1 => self.god_mode = !self.god_mode,
-            2 => self.no_bug_spawns = !self.no_bug_spawns,
-            3 => self.infinite_ammo = !self.infinite_ammo,
-            4 => self.show_physics_debug = !self.show_physics_debug,
-            5 => self.show_perf_stats = !self.show_perf_stats,
-            6 => self.freeze_time_of_day = !self.freeze_time_of_day,
-            7 => self.show_chunk_debug = !self.show_chunk_debug,
-            8 => self.kill_all_bugs_requested = true,
-            9 => self.teleport_origin_requested = true,
-            10 => self.time_scale = 0.25,
-            11 => self.time_scale = 0.5,
-            12 => self.time_scale = 1.0,
-            13 => self.time_scale = 2.0,
+            0 => self.show_debug_overlay = !self.show_debug_overlay,
+            1 => self.noclip = !self.noclip,
+            2 => self.god_mode = !self.god_mode,
+            3 => self.no_bug_spawns = !self.no_bug_spawns,
+            4 => self.infinite_ammo = !self.infinite_ammo,
+            5 => self.show_physics_debug = !self.show_physics_debug,
+            6 => self.show_perf_stats = !self.show_perf_stats,
+            7 => self.freeze_time_of_day = !self.freeze_time_of_day,
+            8 => self.show_chunk_debug = !self.show_chunk_debug,
+            9 => self.kill_all_bugs_requested = true,
+            10 => self.teleport_origin_requested = true,
+            11 => self.time_scale = 0.25,
+            12 => self.time_scale = 0.5,
+            13 => self.time_scale = 1.0,
+            14 => self.time_scale = 2.0,
             _ => {}
         }
     }

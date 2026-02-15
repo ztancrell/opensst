@@ -29,11 +29,10 @@ use crate::{GamePhase, GameState, SupplyCrate};
 pub fn gameplay(state: &mut GameState, dt: f32) {
     const MAX_TAC_FIGHTERS: usize = 8;
 
-    // Handle warp / quantum travel sequence (first-person bridge view — Star Citizen style)
+    // Handle warp / quantum travel sequence — player stands at the front with pilot and captain, looking out the viewscreen
     if let Some(ref mut warp) = state.warp_sequence {
         warp.timer += dt;
-        // First-person bridge view during warp (no planet curvature)
-        state.camera.transform.position = Vec3::new(0.0, 2.2, 14.0);
+        state.camera.transform.position = Vec3::new(0.0, 1.7, 10.0);
         state.camera.set_yaw_pitch(0.0, 0.0);
         state.renderer.update_camera(&state.camera, 0.0);
         if warp.is_complete() {
@@ -90,7 +89,6 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
             state.camera.position().z as f64,
         );
 
-        // Check if approaching a planet
         state.check_planet_approach();
     }
 
@@ -110,8 +108,8 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
     // Update flow field target to player position (for AI)
     state.horde_ai.update_target(state.player.position);
 
-    // Spawn bugs with physics integration (skip if debug disabled)
-    if !state.debug.no_bug_spawns {
+    // Spawn bugs with physics integration (only on planet surface — never in ship)
+    if !state.debug.no_bug_spawns && state.current_planet_idx.is_some() {
         state.spawn_physics_bugs(dt);
 
         // Bug holes spawn bugs near themselves
@@ -160,28 +158,30 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
         |x, z| state.chunk_manager.walkable_height(x, z),
     );
 
-    // Snap living bugs to terrain/water surface and sync kinematic physics bodies
+    // Snap living bugs to terrain/water surface and sync kinematic physics bodies (only on planet)
     // Only snap bugs within 160m of the player – distant bugs are culled anyway
-    let player_snap_pos = state.player.position;
-    for (_, (transform, health, physics_bug)) in
-        state.world.query_mut::<(&mut Transform, &Health, &PhysicsBug)>()
-    {
-        if !health.is_dead() && !physics_bug.is_ragdoll {
-            let dist_sq = (transform.position.x - player_snap_pos.x).powi(2)
-                + (transform.position.z - player_snap_pos.z).powi(2);
-            if dist_sq > 160.0 * 160.0 {
-                continue; // Too far, skip expensive terrain sample
-            }
-            let surface_y = state.chunk_manager.walkable_height(
-                transform.position.x,
-                transform.position.z,
-            );
-            // Place bug center above terrain/water; extra clearance prevents slope clipping
-            let half_height = transform.scale.y * 0.6 + 0.15;
-            transform.position.y = surface_y + half_height;
-            // Keep kinematic body in sync so collisions work
-            if let Some(handle) = physics_bug.body_handle {
-                state.physics.set_kinematic_position(handle, transform.position);
+    if state.current_planet_idx.is_some() {
+        let player_snap_pos = state.player.position;
+        for (_, (transform, health, physics_bug)) in
+            state.world.query_mut::<(&mut Transform, &Health, &PhysicsBug)>()
+        {
+            if !health.is_dead() && !physics_bug.is_ragdoll {
+                let dist_sq = (transform.position.x - player_snap_pos.x).powi(2)
+                    + (transform.position.z - player_snap_pos.z).powi(2);
+                if dist_sq > 160.0 * 160.0 {
+                    continue; // Too far, skip expensive terrain sample
+                }
+                let surface_y = state.chunk_manager.walkable_height(
+                    transform.position.x,
+                    transform.position.z,
+                );
+                // Place bug center above terrain/water; extra clearance prevents slope clipping
+                let half_height = transform.scale.y * 0.6 + 0.15;
+                transform.position.y = surface_y + half_height;
+                // Keep kinematic body in sync so collisions work
+                if let Some(handle) = physics_bug.body_handle {
+                    state.physics.set_kinematic_position(handle, transform.position);
+                }
             }
         }
     }
@@ -1138,8 +1138,8 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
                 state.renderer.update_camera(&state.camera, state.planet_radius_for_curvature());
             }
         } else {
-            // Normal play: standard far plane
-            state.camera.far = 1000.0;
+            // Ship interior: extend far plane so distant star and planets render
+            state.camera.far = if state.phase == GamePhase::InShip { 5000.0 } else { 1000.0 };
         }
 
         // Handle extraction completion

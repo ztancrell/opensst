@@ -252,6 +252,7 @@ pub struct GameState {
     /// Base defense mode (UCF planet + Hold the Line / Defense): center and inner radius.
     /// Bugs spawn outside this perimeter; player and squad spawn on walls.
     defense_base: Option<(Vec3, f32)>,
+
 }
 
 /// State for the ship interior phase before deploying.
@@ -867,7 +868,6 @@ pub(crate) fn roger_young_interior_parts() -> Vec<ShipInteriorPart> {
         // Corridor lights
         ShipInteriorPart { pos: Vec3::new(0.0, 4.1, -18.0), scale: Vec3::new(0.2, 0.1, 1.0), color: light_warm, mesh_type: 2 },
         ShipInteriorPart { pos: Vec3::new(0.0, 4.1, -22.0), scale: Vec3::new(0.2, 0.1, 1.0), color: light_warm, mesh_type: 2 },
-
         // ══════ DROP BAY (aft end of corridor) ══════
         // Drop bay floor
         ShipInteriorPart { pos: Vec3::new(0.0, -0.1, -28.0), scale: Vec3::new(8.0, 0.2, 6.0), color: grate, mesh_type: 0 },
@@ -2341,7 +2341,8 @@ impl GameState {
         // FTL from war table: advance warp while InShip (gameplay() only runs when Playing)
         if let Some(ref mut warp) = self.warp_sequence {
             warp.timer += dt;
-            self.camera.transform.position = Vec3::new(0.0, 2.2, 14.0);
+            // Stand at the front with pilot (Lt. Parks) and captain (Ensign Levy), looking out the viewscreen
+            self.camera.transform.position = Vec3::new(0.0, 1.7, 10.0);
             self.camera.set_yaw_pitch(0.0, 0.0);
             self.renderer.update_camera(&self.camera, 0.0);
             if warp.is_complete() {
@@ -2373,7 +2374,8 @@ impl GameState {
         let war_table_pos = self.ship_state.as_ref().map_or(Vec3::ZERO, |s| s.war_table_pos);
         let drop_bay_pos = self.ship_state.as_ref().map_or(Vec3::ZERO, |s| s.drop_bay_pos);
 
-        // ── FPS movement inside the ship (unless war table is active) ──
+        // ── FPS movement inside the ship: artificial 1G (earth-like gravity) ──
+        // Floor clamp and horizontal movement simulate gravity; no zero-G in interior.
         if !war_table_active {
             // Mouse look (uses camera's built-in yaw/pitch system)
             let mouse_delta = self.input.mouse_delta();
@@ -2432,10 +2434,8 @@ impl GameState {
         if self.input.is_key_pressed(KeyCode::KeyE) {
             if let Some(ref mut ship) = self.ship_state {
                 if ship.war_table_active {
-                    // Deactivate war table
                     ship.war_table_active = false;
                 } else if dist_to_table < 4.0 {
-                    // Activate war table
                     ship.war_table_active = true;
                 }
             }
@@ -3318,18 +3318,56 @@ impl GameState {
             self.player.look_direction = self.camera.forward();
         }
 
-        if self.debug.noclip || self.current_planet_idx.is_none() {
-            // --- NOCLIP / SPACE MODE ---
-            // Free-fly camera with no collision or gravity
+        if self.current_planet_idx.is_none() {
+            // --- ZERO-G SPACE FLIGHT ---
+            // Thrust-based movement: velocity persists, no gravity. Used for approach phase and any time in space.
+            self.handle_zero_g_movement(dt);
+        } else if self.debug.noclip {
+            // --- NOCLIP (debug on planet) ---
             self.handle_noclip_movement(dt);
         } else {
             // --- FPS WALKING MODE ---
-            // Proper ground-based movement with gravity, jumping, and terrain collision
+            // Ground-based movement with gravity, jumping, and terrain collision
             self.handle_fps_movement(dt);
         }
     }
 
-    /// Noclip free-fly camera movement (debug mode / space navigation).
+    /// Zero-G space flight simulation: thrust (WASD + Space/Ctrl) accelerates the player; velocity persists with no gravity.
+    fn handle_zero_g_movement(&mut self, dt: f32) {
+        const THRUST: f32 = 28.0;
+        const MAX_SPEED: f32 = 120.0;
+
+        let movement = self.input.get_movement_input();
+        let move_y = if self.input.is_key_held(KeyCode::Space) {
+            1.0
+        } else if self.input.is_crouching() {
+            -1.0
+        } else {
+            0.0
+        };
+
+        let forward = self.camera.transform.forward();
+        let right = self.camera.transform.right();
+        let up = self.camera.transform.up();
+
+        let mut thrust_dir = forward * movement.y + right * movement.x + up * move_y;
+        if thrust_dir.length_squared() > 0.01 {
+            thrust_dir = thrust_dir.normalize();
+            self.player_velocity += thrust_dir * (THRUST * dt);
+        }
+
+        let speed = self.player_velocity.length();
+        if speed > MAX_SPEED {
+            self.player_velocity = self.player_velocity.normalize() * MAX_SPEED;
+        }
+
+        self.camera.transform.position += self.player_velocity * dt;
+        self.player.position = self.camera.transform.position;
+
+        self.player_grounded = false;
+    }
+
+    /// Noclip free-fly camera movement (debug mode on planet).
     fn handle_noclip_movement(&mut self, dt: f32) {
         let movement = self.input.get_movement_input();
         let move_y = if self.input.is_key_held(KeyCode::Space) {
@@ -4219,12 +4257,13 @@ impl GameState {
             self.ground_track_bug_timer = 0.0;
             self.squad_track_last.clear();
 
-            // Teleport camera to the universe position
+            // Teleport camera to the universe position; zero velocity for space
             self.camera.transform.position = Vec3::new(
                 self.universe_position.x as f32,
                 self.universe_position.y as f32,
                 self.universe_position.z as f32,
             );
+            self.player_velocity = Vec3::ZERO;
         }
     }
 
@@ -5239,42 +5278,71 @@ impl GameState {
     }
 
     /// Build celestial body instances for rendering.
-    /// When InShip, places star and planets in ship-local space so the chosen planet is visible through the viewscreen (Helldivers 2 style).
+    /// When InShip, places star and planets in ship-local space so the view matches the bridge.
     fn build_celestial_instances(&self) -> Vec<CelestialBodyInstance> {
         let mut instances = Vec::new();
+        let in_ship = self.phase == GamePhase::InShip;
 
-        // Ship interior: real-time view out the windows — target planet ahead through viewscreen, star and others in scene
-        if self.phase == GamePhase::InShip {
-            if let Some(ref ship) = self.ship_state {
-                let star = &self.current_system.star;
-                let target_idx = ship.target_planet_idx.min(self.current_system.bodies.len().saturating_sub(1));
-                let ot = self.orbital_time as f32;
-                let n = self.current_system.bodies.len().max(1);
+        if in_ship && !self.current_system.bodies.is_empty() {
+            let target_idx = self.ship_state.as_ref()
+                .map(|s| s.target_planet_idx)
+                .unwrap_or(0)
+                .min(self.current_system.bodies.len().saturating_sub(1));
+            let star = &self.current_system.star;
+            let ot = self.orbital_time as f32;
+            let n = self.current_system.bodies.len().max(1);
 
-                // Star: above and behind the viewscreen (lights the scene)
-                let star_pos = Vec3::new(0.0, 28.0, 150.0);
-                let star_radius = (star.radius * 0.015).max(3.0).min(8.0);
-                instances.push(CelestialBodyInstance {
-                    position: star_pos.into(),
-                    radius: star_radius,
-                    color: [star.color.x, star.color.y, star.color.z, 1.0],
-                    star_direction: [0.0, 0.0, 0.0, 0.0],
-                    atmosphere_color: [0.0, 0.0, 0.0, 0.0],
-                });
+            // Star: above and behind the viewscreen (lights the scene, clearly visible)
+            let star_pos = Vec3::new(0.0, 28.0, 150.0);
+            let star_radius = (star.radius * 0.015).max(3.0).min(8.0);
+            instances.push(CelestialBodyInstance {
+                position: star_pos.into(),
+                radius: star_radius,
+                color: [star.color.x, star.color.y, star.color.z, 1.0],
+                star_direction: [0.0, 0.0, 0.0, 0.0],
+                atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+            });
 
-                // Target planet: prominent through the forward viewscreen (the one you chose at the war table)
-                let body = &self.current_system.bodies[target_idx];
-                let planet_scale = 0.04; // ship-local scale so visual_radius ~300 -> ~12
-                let target_planet_pos = Vec3::new(0.0, 1.5, 68.0);
-                let target_radius = (body.planet.visual_radius() * planet_scale).max(6.0).min(20.0);
-                let body_to_star = (star_pos - target_planet_pos).normalize();
+            // Target planet: prominent through the forward window (the one you chose at the war table)
+            let body = &self.current_system.bodies[target_idx];
+            let planet_scale = 0.04;
+            let target_planet_pos = Vec3::new(0.0, 1.5, 68.0);
+            let target_radius = (body.planet.visual_radius() * planet_scale).max(6.0).min(20.0);
+            let body_to_star = (star_pos - target_planet_pos).normalize();
+            let biome_cfg = body.planet.get_biome_config();
+            let planet_color = biome_cfg.base_color;
+            instances.push(CelestialBodyInstance {
+                position: target_planet_pos.into(),
+                radius: target_radius,
+                color: [planet_color.x, planet_color.y, planet_color.z, 0.3],
+                star_direction: [body_to_star.x, body_to_star.y, body_to_star.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
+                atmosphere_color: [
+                    body.planet.atmosphere_color.x,
+                    body.planet.atmosphere_color.y,
+                    body.planet.atmosphere_color.z,
+                    if body.ring_system { 1.0 } else { 0.0 },
+                ],
+            });
+
+            // Other planets: in an arc beside/around the view (visible through the windows), gentle drift
+            for (i, body) in self.current_system.bodies.iter().enumerate() {
+                if i == target_idx {
+                    continue;
+                }
+                let angle = (i as f32 / n as f32) * std::f32::consts::TAU + ot * 0.12;
+                let px = angle.cos() * 32.0;
+                let pz = 72.0 + angle.sin() * 18.0;
+                let py = 2.0 + (ot * 0.5 + i as f32).sin() * 2.0;
+                let pos = Vec3::new(px, py, pz);
+                let radius = (body.planet.visual_radius() * planet_scale * 0.5).max(2.0).min(5.0);
+                let bts = (star_pos - pos).normalize();
                 let biome_cfg = body.planet.get_biome_config();
-                let planet_color = biome_cfg.base_color;
+                let color = biome_cfg.base_color;
                 instances.push(CelestialBodyInstance {
-                    position: target_planet_pos.into(),
-                    radius: target_radius,
-                    color: [planet_color.x, planet_color.y, planet_color.z, 0.3],
-                    star_direction: [body_to_star.x, body_to_star.y, body_to_star.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
+                    position: pos.into(),
+                    radius,
+                    color: [color.x, color.y, color.z, 0.3],
+                    star_direction: [bts.x, bts.y, bts.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
                     atmosphere_color: [
                         body.planet.atmosphere_color.x,
                         body.planet.atmosphere_color.y,
@@ -5282,36 +5350,8 @@ impl GameState {
                         if body.ring_system { 1.0 } else { 0.0 },
                     ],
                 });
-
-                // Other planets: smaller, in an arc (visible through side windows / viewscreen edges), gentle drift with orbital_time
-                for (i, body) in self.current_system.bodies.iter().enumerate() {
-                    if i == target_idx {
-                        continue;
-                    }
-                    let angle = (i as f32 / n as f32) * std::f32::consts::TAU + ot * 0.12;
-                    let px = angle.cos() * 32.0;
-                    let pz = 72.0 + angle.sin() * 18.0;
-                    let py = 2.0 + (ot * 0.5 + i as f32).sin() * 2.0;
-                    let pos = Vec3::new(px, py, pz);
-                    let radius = (body.planet.visual_radius() * planet_scale * 0.5).max(2.0).min(5.0);
-                    let bts = (star_pos - pos).normalize();
-                    let biome_cfg = body.planet.get_biome_config();
-                    let color = biome_cfg.base_color;
-                    instances.push(CelestialBodyInstance {
-                        position: pos.into(),
-                        radius,
-                        color: [color.x, color.y, color.z, 0.3],
-                        star_direction: [bts.x, bts.y, bts.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
-                        atmosphere_color: [
-                            body.planet.atmosphere_color.x,
-                            body.planet.atmosphere_color.y,
-                            body.planet.atmosphere_color.z,
-                            if body.ring_system { 1.0 } else { 0.0 },
-                        ],
-                    });
-                }
-                return instances;
             }
+            return instances;
         }
 
         let cam_pos = self.camera.position();

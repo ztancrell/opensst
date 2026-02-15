@@ -45,8 +45,10 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
         return tb;
     }
 
-    // ---- Pause menu ----
+    // ---- Pause menu: full-screen dark overlay ----
     if state.phase == GamePhase::Paused {
+        tb.add_rect(0.0, 0.0, sw, sh, [0.08, 0.08, 0.08, 1.0]); // Dark grey background
+
         let title = "PAUSED";
         let title_scale = 2.0;
         let title_w = title.len() as f32 * 8.0 * title_scale;
@@ -74,100 +76,102 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
         || ((state.phase == GamePhase::InShip || state.phase == GamePhase::ApproachPlanet)
             && !approach_in_space);
 
-    // ---- Top-left: debug info (F3-style) ----
-    let mut y = 4.0;
+    // ---- Top-left: debug info (F3-style) — can be hidden via debug menu "Show Debug Overlay" ----
     let x = 4.0;
+    if state.debug.show_debug_overlay {
+        let mut y = 4.0;
 
-    let fps_text = format!("FPS: {:.0}", state.time.fps());
-    tb.add_text_with_bg(x, y, &fps_text, scale, tactical_green, bg);
-    y += line_h;
-
-    let pos = state.camera.position();
-    let alt = pos.y.max(0.0);
-    let zone = if alt > 450.0 { "SPACE" }
-        else if alt > 100.0 { "Upper Atmo" }
-        else if alt > 30.0 { "Low Atmo" }
-        else { "Surface" };
-    let pos_text = format!("XYZ: {:.1}/{:.1}/{:.1}  Alt: {:.0}m [{}]", pos.x, pos.y, pos.z, alt, zone);
-    tb.add_text_with_bg(x, y, &pos_text, scale, white, bg);
-    y += line_h;
-
-    // System info
-    let system_text = format!(
-        "System: {} | Star: {} ({:?})",
-        state.current_system.name,
-        state.current_system.star.name,
-        state.current_system.star.star_type,
-    );
-    tb.add_text_with_bg(x, y, &system_text, scale, [0.6, 0.8, 1.0, 1.0], bg);
-    y += line_h;
-
-    // Planet info
-    let planet_text = if let Some(idx) = state.current_planet_idx {
-        format!("Planet: {} [{}/{}] | {:?}", state.planet.name, idx + 1, state.current_system.bodies.len(), state.planet.primary_biome)
-    } else {
-        format!("In Space | {} planets in system", state.current_system.bodies.len())
-    };
-    tb.add_text_with_bg(x, y, &planet_text, scale, [0.8, 1.0, 0.6, 1.0], bg);
-    y += line_h;
-
-    if state.current_planet_idx.is_some() {
-        let chunks_text = format!("Chunks: {}", state.chunk_manager.chunks.len());
-        tb.add_text_with_bg(x, y, &chunks_text, scale, gray, bg);
+        let fps_text = format!("FPS: {:.0}", state.time.fps());
+        tb.add_text_with_bg(x, y, &fps_text, scale, tactical_green, bg);
         y += line_h;
 
-        let bugs_alive = state.count_living_bugs();
-        let threat = &state.spawner.threat_level;
-        let bugs_text = format!(
-            "Bugs: {}  Kills: {}  Time: {}  Threat: {}",
-            bugs_alive,
-            state.mission.bugs_killed,
-            state.spawner.time_survived_str(),
-            threat.name(),
+        let pos = state.camera.position();
+        let alt = pos.y.max(0.0);
+        let zone = if alt > 450.0 { "SPACE" }
+            else if alt > 100.0 { "Upper Atmo" }
+            else if alt > 30.0 { "Low Atmo" }
+            else { "Surface" };
+        let pos_text = format!("XYZ: {:.1}/{:.1}/{:.1}  Alt: {:.0}m [{}]", pos.x, pos.y, pos.z, alt, zone);
+        tb.add_text_with_bg(x, y, &pos_text, scale, white, bg);
+        y += line_h;
+
+        // System info
+        let system_text = format!(
+            "System: {} | Star: {} ({:?})",
+            state.current_system.name,
+            state.current_system.star.name,
+            state.current_system.star.star_type,
         );
-        tb.add_text_with_bg(x, y, &bugs_text, scale, threat.color(), bg);
+        tb.add_text_with_bg(x, y, &system_text, scale, [0.6, 0.8, 1.0, 1.0], bg);
         y += line_h;
 
-        let tod_name = if state.time_of_day < 0.125 { "Dawn" }
-            else if state.time_of_day < 0.375 { "Day" }
-            else if state.time_of_day < 0.625 { "Dusk" }
-            else { "Night" };
-        let weather_name = format!("{:?}", state.weather.current);
-        let blend_info = if state.weather.current != state.weather.target {
-            format!(" -> {:?} ({:.0}%)", state.weather.target, state.weather.blend * 100.0)
+        // Planet info
+        let planet_text = if let Some(idx) = state.current_planet_idx {
+            format!("Planet: {} [{}/{}] | {:?}", state.planet.name, idx + 1, state.current_system.bodies.len(), state.planet.primary_biome)
         } else {
-            String::new()
+            format!("In Space | {} planets in system", state.current_system.bodies.len())
         };
-        let weather_text = format!("Weather: {}{} | {} ({:.2})", weather_name, blend_info, tod_name, state.time_of_day);
-        tb.add_text_with_bg(x, y, &weather_text, scale, gray, bg);
+        tb.add_text_with_bg(x, y, &planet_text, scale, [0.8, 1.0, 0.6, 1.0], bg);
         y += line_h;
-    }
 
-    // Player controller info (when on planet in FPS mode)
-    if state.current_planet_idx.is_some() && !state.debug.noclip && state.debug.show_perf_stats {
-        let speed = Vec3::new(state.player_velocity.x, 0.0, state.player_velocity.z).length();
-        let ground_str = if state.player_grounded { "GROUNDED" } else { "AIRBORNE" };
-        let ctrl_info = format!(
-            "Speed: {:.1} m/s | {} | HP: {:.0}/{:.0} | Stamina: {:.0}%",
-            speed, ground_str, state.player.health, state.player.max_health, state.player.stamina_percent() * 100.0
-        );
-        tb.add_text_with_bg(x, y, &ctrl_info, scale, [0.6, 0.9, 0.6, 1.0], bg);
-        y += line_h;
-    }
-
-    // Controls hint
-    let controls_text = if state.debug.noclip {
         if state.current_planet_idx.is_some() {
-            "NOCLIP | R=next planet | M=galaxy map | F3=debug"
-        } else {
-            "NOCLIP | Approach planet to land | M=galaxy map | F3=debug"
+            let chunks_text = format!("Chunks: {}", state.chunk_manager.chunks.len());
+            tb.add_text_with_bg(x, y, &chunks_text, scale, gray, bg);
+            y += line_h;
+
+            let bugs_alive = state.count_living_bugs();
+            let threat = &state.spawner.threat_level;
+            let bugs_text = format!(
+                "Bugs: {}  Kills: {}  Time: {}  Threat: {}",
+                bugs_alive,
+                state.mission.bugs_killed,
+                state.spawner.time_survived_str(),
+                threat.name(),
+            );
+            tb.add_text_with_bg(x, y, &bugs_text, scale, threat.color(), bg);
+            y += line_h;
+
+            let tod_name = if state.time_of_day < 0.125 { "Dawn" }
+                else if state.time_of_day < 0.375 { "Day" }
+                else if state.time_of_day < 0.625 { "Dusk" }
+                else { "Night" };
+            let weather_name = format!("{:?}", state.weather.current);
+            let blend_info = if state.weather.current != state.weather.target {
+                format!(" -> {:?} ({:.0}%)", state.weather.target, state.weather.blend * 100.0)
+            } else {
+                String::new()
+            };
+            let weather_text = format!("Weather: {}{} | {} ({:.2})", weather_name, blend_info, tod_name, state.time_of_day);
+            tb.add_text_with_bg(x, y, &weather_text, scale, gray, bg);
+            y += line_h;
         }
-    } else if state.current_planet_idx.is_some() {
-        "WASD=walk | LMB=shoot | RMB=aim | R=reload | 1/2=weapon | F3=debug"
-    } else {
-        "Approach planet to land | M=galaxy map | F3=debug"
-    };
-    tb.add_text_with_bg(x, y, controls_text, scale, tactical_amber, bg);
+
+        // Player controller info (when on planet in FPS mode)
+        if state.current_planet_idx.is_some() && !state.debug.noclip && state.debug.show_perf_stats {
+            let speed = Vec3::new(state.player_velocity.x, 0.0, state.player_velocity.z).length();
+            let ground_str = if state.player_grounded { "GROUNDED" } else { "AIRBORNE" };
+            let ctrl_info = format!(
+                "Speed: {:.1} m/s | {} | HP: {:.0}/{:.0} | Stamina: {:.0}%",
+                speed, ground_str, state.player.health, state.player.max_health, state.player.stamina_percent() * 100.0
+            );
+            tb.add_text_with_bg(x, y, &ctrl_info, scale, [0.6, 0.9, 0.6, 1.0], bg);
+            y += line_h;
+        }
+
+        // Controls hint
+        let controls_text = if state.debug.noclip {
+            if state.current_planet_idx.is_some() {
+                "NOCLIP | R=next planet | M=galaxy map | F3=debug"
+            } else {
+                "NOCLIP | Approach planet to land | M=galaxy map | F3=debug"
+            }
+        } else if state.current_planet_idx.is_some() {
+            "WASD=walk | LMB=shoot | RMB=aim | R=reload | 1/2=weapon | F3=debug"
+        } else {
+            "Approach planet to land | M=galaxy map | F3=debug"
+        };
+        tb.add_text_with_bg(x, y, controls_text, scale, tactical_amber, bg);
+    }
 
     // ---- Galaxy map overlay (when M is pressed) ----
     if state.galaxy_map_open {
@@ -365,6 +369,7 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                     player_pos.z - drop_bay_pos.z,
                 ).length();
 
+
                 if war_table_active {
                     tb.add_rect(sw * 0.05, sh * 0.05, sw * 0.9, sh * 0.9, [0.02, 0.03, 0.06, 0.85]);
                     let accent = [0.15, 0.25, 0.5, 0.6];
@@ -520,7 +525,7 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                         tb.add_text(cx - pw * 0.5, cy + 46.0, &prompt, 2.5, [1.0, 0.5 * flash + 0.3, 0.1, 1.0]);
                     }
 
-                    let hint = format!("Target: {} | WAR TABLE is forward | DROP BAY is aft", state.planet.name);
+                    let hint = format!("Target: {} | WAR TABLE forward | DROP BAY aft", state.planet.name);
                     let hw = hint.len() as f32 * 6.0 * 1.3;
                     tb.add_rect(sw * 0.5 - hw * 0.5 - 6.0, sh - 28.0, hw + 12.0, 22.0, [0.02, 0.03, 0.06, 0.6]);
                     tb.add_text(sw * 0.5 - hw * 0.5, sh - 24.0, &hint, 1.3, [0.4, 0.5, 0.6, 0.8]);

@@ -72,8 +72,9 @@ pub fn run(state: &mut GameState) -> Result<()> {
 
         // ========== COLLECT RENDER DATA ==========
 
-        // Bug instances by type (each bug type uses its own procedural mesh)
         let cam_pos = state.camera.position();
+
+        // Bug instances by type (each bug type uses its own procedural mesh)
         const VIEWMODEL_CULL_RADIUS: f32 = 3.0; // Don't draw bugs/effects this close to camera (avoids geometry in face + tunnel)
         const VIEWMODEL_CULL_SQ: f32 = VIEWMODEL_CULL_RADIUS * VIEWMODEL_CULL_RADIUS;
         const BUG_RENDER_DIST_SQ: f32 = 250.0 * 250.0;    // Max bug render distance
@@ -88,6 +89,9 @@ pub fn run(state: &mut GameState) -> Result<()> {
         for (_, (transform, bug, health, physics_bug)) in
             state.world.query::<(&Transform, &Bug, &Health, &PhysicsBug)>().iter()
         {
+            if state.current_planet_idx.is_none() {
+                continue; // No bugs when not on planet (ship, menu, approach)
+            }
             let dist_sq = transform.position.distance_squared(cam_pos);
             if dist_sq < VIEWMODEL_CULL_SQ || dist_sq > BUG_RENDER_DIST_SQ {
                 continue; // Too close (viewmodel clip) or too far (not visible)
@@ -132,8 +136,9 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Gore instances (skip very close to camera to avoid tunnel/quads in face)
+        // Gore instances (skip very close to camera; only on planet)
         let mut gore_instances: Vec<InstanceData> = Vec::new();
+        if state.current_planet_idx.is_some() {
         for gore in &state.effects.gore_splatters {
             let dist_sq = gore.position.distance_squared(cam_pos);
             if dist_sq < VIEWMODEL_CULL_SQ || dist_sq > GORE_RENDER_DIST_SQ {
@@ -167,11 +172,12 @@ pub fn run(state: &mut GameState) -> Result<()> {
 
             gore_instances.push(InstanceData::new(matrix.to_cols_array_2d(), color));
         }
+        }
 
         // Ground track instances (footprints in snow/sand — Dune / Helldivers 2 style)
         let mut track_instances: Vec<InstanceData> = Vec::new();
         let primary_biome = state.planet.primary_biome;
-        let track_visible = matches!(
+        let track_visible = state.current_planet_idx.is_some() && matches!(
             primary_biome,
             BiomeType::Desert | BiomeType::Frozen | BiomeType::Wasteland | BiomeType::Badlands
         );
@@ -609,46 +615,46 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 0b2: Distant destroyers (ship interior; also during warp for first-person quantum travel)
+        // Pass 0b2: Federation destroyers (ship interior; warp) — realistic scale and depth
         let warp_active = state.warp_sequence.is_some();
         let ship_interior_visible = warp_active
             || ((state.phase == GamePhase::InShip || state.phase == GamePhase::ApproachPlanet)
                 && !approach_in_space);
         if ship_interior_visible {
             let timer = state.ship_state.as_ref().map_or(0.0, |s| s.timer);
+            let ot = state.orbital_time as f32;
+            let fleet_scale = if in_ship_interior { 2.4 } else { 1.0 };
             let mut destroyer_rock: Vec<InstanceData> = Vec::new();
             let mut destroyer_glow: Vec<InstanceData> = Vec::new();
             let hull_color = [0.12, 0.14, 0.18, 1.0]; // dark hull silhouette
             let engine_glow = [0.18, 0.35, 0.55, 0.4]; // engine glow (emissive)
-            // Forward view: destroyers ahead (elongated rock mesh = ship silhouette)
-            for (i, &(z, x_off, scale_len)) in [(55.0, 0.0, 4.0), (95.0, 2.5, 3.0), (140.0, -1.5, 5.0), (75.0, -3.0, 2.5)].iter().enumerate() {
-                let wobble = (timer * 0.2 + i as f32).sin() * 0.3;
-                let pos = Vec3::new(x_off + wobble, 1.5 + (timer * 0.15 + i as f32 * 0.7).sin() * 0.5, z);
+            // Destroyers: capital-ship scale (~35–45 units long like Roger Young), at fleet distance (250–650)
+            let destroyer_specs: [(f32, f32, f32, f32); 6] = [
+                (0.0, 30.0, 380.0, 38.0),   // center, ahead
+                (-140.0, 20.0, 480.0, 42.0),
+                (100.0, -15.0, 320.0, 35.0),
+                (160.0, 35.0, 580.0, 40.0),
+                (-80.0, -25.0, 420.0, 36.0),
+                (-200.0, 10.0, 620.0, 44.0),
+            ];
+            for (i, &(x_off, y_off, z, scale_len)) in destroyer_specs.iter().enumerate() {
+                let len = scale_len * fleet_scale;
+                let wobble = (timer * 0.15 + i as f32).sin() * 4.0;
+                let pos = Vec3::new(x_off + wobble, y_off + (timer * 0.1 + i as f32 * 0.5).sin() * 3.0, z);
+                let rot_y = timer * 0.03 + i as f32 * 0.15;
                 let matrix = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.25, 0.15, scale_len),
-                    Quat::from_rotation_y(timer * 0.05 + i as f32 * 0.2),
-                    pos,
-                );
-                destroyer_rock.push(InstanceData::new(matrix.to_cols_array_2d(), hull_color));
-                let stern = pos - Vec3::new(0.0, 0.0, scale_len * 0.6);
-                let glow_mat = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.2, 0.1, 0.15),
-                    Quat::IDENTITY,
-                    stern,
-                );
-                destroyer_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), engine_glow));
-            }
-            // Port/starboard: destroyers visible through side windows
-            let side_z = 15.0 + (timer * 0.1).sin() * 3.0;
-            let port_pos = Vec3::new(-35.0, 2.0, side_z);
-            let sb_pos = Vec3::new(38.0, 1.8, side_z - 5.0);
-            for (pos, rot_y) in [(port_pos, 0.2), (sb_pos, -0.2)] {
-                let matrix = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.2, 0.2, 2.5),
+                    Vec3::new(1.4 * fleet_scale, 0.55 * fleet_scale, len), // hull cross-section and length
                     Quat::from_rotation_y(rot_y),
                     pos,
                 );
                 destroyer_rock.push(InstanceData::new(matrix.to_cols_array_2d(), hull_color));
+                let stern = pos - Vec3::new(0.0, 0.0, len * 0.55);
+                let glow_mat = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(1.0 * fleet_scale, 0.5 * fleet_scale, 1.8 * fleet_scale),
+                    Quat::IDENTITY,
+                    stern,
+                );
+                destroyer_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), engine_glow));
             }
             if !destroyer_rock.is_empty() {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.rock, &destroyer_rock);
@@ -657,37 +663,40 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.flash_mesh, &destroyer_glow);
             }
 
-            // Pass 0b3: Federation corvettes in real-time planet orbit (Starship Troopers / Heinlein fleet)
-            let ot = state.orbital_time as f32;
+            // Pass 0b3: Federation corvettes — smaller than destroyers, orbital patrol (realistic relative scale)
             let mut corvette_rock: Vec<InstanceData> = Vec::new();
             let mut corvette_glow: Vec<InstanceData> = Vec::new();
             let corvette_hull = [0.10, 0.12, 0.16, 1.0];
             let corvette_engine = [0.12, 0.28, 0.50, 0.5];
-            // Corvettes orbit in the same plane as planets (XZ); orbital_time drives real-time motion — see them through the CIC windows
             for (i, &(radius, phase, speed)) in [
-                (75.0f32, 0.0, 0.18),
-                (110.0, 1.8, 0.14),
-                (145.0, 3.5, 0.12),
-                (65.0, 4.2, 0.22),
-                (130.0, 5.1, 0.13),
-                (90.0, 2.3, 0.16),
-                (52.0, 0.7, 0.24),   // inner picket
-                (165.0, 4.8, 0.10),  // outer patrol
+                (120.0f32, 0.0, 0.18),
+                (180.0, 1.8, 0.14),
+                (220.0, 3.5, 0.12),
+                (95.0, 4.2, 0.22),
+                (260.0, 5.1, 0.10),
+                (155.0, 2.3, 0.16),
+                (75.0, 0.7, 0.24),
+                (290.0, 4.8, 0.09),
             ].iter().enumerate() {
-                let scale_len = 1.2 + (i as f32 * 0.17).sin() * 0.3;
+                let base_len = 16.0 + (i as f32 * 0.17).sin() * 3.0; // ~16–19 units (smaller than destroyers)
+                let scale_len = base_len * fleet_scale;
                 let angle = phase + ot * speed;
-                let pos = Vec3::new(angle.cos() * radius, 0.8 + (ot * 0.5 + i as f32).sin() * 0.4, angle.sin() * radius);
-                let facing = Vec3::new(-angle.sin(), 0.0, angle.cos()); // tangent = direction of motion
+                let pos = Vec3::new(
+                    angle.cos() * radius,
+                    (ot * 0.4 + i as f32).sin() * 25.0,
+                    angle.sin() * radius,
+                );
+                let facing = Vec3::new(-angle.sin(), 0.0, angle.cos());
                 let rot = Quat::from_rotation_arc(Vec3::Z, facing);
                 let matrix = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.12, 0.07, scale_len),
+                    Vec3::new(0.55 * fleet_scale, 0.28 * fleet_scale, scale_len),
                     rot,
                     pos,
                 );
                 corvette_rock.push(InstanceData::new(matrix.to_cols_array_2d(), corvette_hull));
                 let stern = pos - facing * scale_len * 0.5;
                 let glow_mat = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.08, 0.04, 0.06),
+                    Vec3::new(0.35 * fleet_scale, 0.2 * fleet_scale, 0.9 * fleet_scale),
                     Quat::IDENTITY,
                     stern,
                 );
@@ -867,7 +876,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 1: Terrain (only when playing or dropping on a planet — never in ship or menu)
+        // Pass 1: Terrain (only when on planet surface — never in ship or menu)
         if state.current_planet_idx.is_some()
             && (state.phase == GamePhase::Playing || state.phase == GamePhase::DropSequence)
         {
@@ -1160,9 +1169,9 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 1b-1l: All static environment entities via cached render data.
-        // Query CachedRenderData only so destructibles, landmarks, and hazards (no Destructible) are all included.
+        // Pass 1b-1l: All static environment entities via cached render data (only on planet).
         let mut env_instances: [Vec<InstanceData>; ENV_MESH_GROUP_COUNT] = Default::default();
+        if state.current_planet_idx.is_some() {
         for (entity, (cached,)) in state.world.query::<(&CachedRenderData,)>().iter() {
             if let Ok(d) = state.world.get::<&Destructible>(entity) {
                 if d.health <= 0.0 {
@@ -1238,6 +1247,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
         // Mesh group 7: hazard (environmental hazards; use prop_sphere for disc/zone look)
         if !env_instances[MESH_GROUP_HAZARD as usize].is_empty() {
             state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.prop_sphere, &env_instances[MESH_GROUP_HAZARD as usize]);
+        }
         }
 
         // Pass 1l2: Destruction debris (Tac Fighter / explosion flying chunks)
@@ -2360,7 +2370,8 @@ pub fn run(state: &mut GameState) -> Result<()> {
         // Pass 6: Viewmodel (M1A4 Morita Rifle) - animated, multi-part composition
         // Each part is a unit cube scaled/positioned to form the Morita silhouette
         let player_in_boat = state.extraction.as_ref().map_or(false, |e: &ExtractionDropship| e.player_camera_locked());
-        let show_viewmodel = !state.debug.noclip && state.current_planet_idx.is_some()
+        // Show rifle/arms on planet (FPS) — never in noclip or in boat
+        let show_viewmodel = (!state.debug.noclip && state.current_planet_idx.is_some())
             && state.phase == GamePhase::Playing && state.player.is_alive && !player_in_boat
             && !state.player.is_shovel_equipped();
         if show_viewmodel {
