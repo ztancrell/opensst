@@ -3,6 +3,7 @@
 mod biome_atmosphere;
 mod biome_features;
 mod bug;
+mod config;
 mod render;
 mod state;
 mod update;
@@ -167,6 +168,10 @@ pub struct GameState {
     phase: GamePhase,
     /// Main menu selection: 0 = Play, 1 = Quit.
     main_menu_selected: usize,
+    /// When Paused: 0 = Resume, 1 = Quit to main menu.
+    pause_menu_selected: usize,
+    /// Phase to restore when resuming from Paused.
+    previous_phase: Option<GamePhase>,
     running: bool,
     /// Smoothed delta time for consistent motion (avoids laggy feel from frame spikes).
     smoothed_dt: f32,
@@ -1596,11 +1601,14 @@ impl ChunkManager {
                                 let transfer = (diff - max_diff) * transfer_factor * 0.25;
                                 let nidx = nj * res + ni;
                                 if (cx, cz) == (ncx, ncz) {
-                                    let d = deltas.get_mut(&(cx, cz)).unwrap();
-                                    d[idx] -= transfer;
-                                    d[nidx] += transfer;
+                                    if let Some(d) = deltas.get_mut(&(cx, cz)) {
+                                        d[idx] -= transfer;
+                                        d[nidx] += transfer;
+                                    }
                                 } else {
-                                    deltas.get_mut(&(cx, cz)).unwrap()[idx] -= transfer;
+                                    if let Some(d) = deltas.get_mut(&(cx, cz)) {
+                                        d[idx] -= transfer;
+                                    }
                                     if let Some(nd) = deltas.get_mut(&(ncx, ncz)) {
                                         nd[nidx] += transfer;
                                     }
@@ -1612,11 +1620,14 @@ impl ChunkManager {
                                 let transfer = (hn - h - max_diff) * transfer_factor * 0.25;
                                 let nidx = nj * res + ni;
                                 if (cx, cz) == (ncx, ncz) {
-                                    let d = deltas.get_mut(&(cx, cz)).unwrap();
-                                    d[idx] += transfer;
-                                    d[nidx] -= transfer;
+                                    if let Some(d) = deltas.get_mut(&(cx, cz)) {
+                                        d[idx] += transfer;
+                                        d[nidx] -= transfer;
+                                    }
                                 } else {
-                                    deltas.get_mut(&(cx, cz)).unwrap()[idx] += transfer;
+                                    if let Some(d) = deltas.get_mut(&(cx, cz)) {
+                                        d[idx] += transfer;
+                                    }
                                     if let Some(nd) = deltas.get_mut(&(ncx, ncz)) {
                                         nd[nidx] -= transfer;
                                     }
@@ -1966,6 +1977,8 @@ impl GameState {
             game_messages: GameMessages::new(),
             phase: GamePhase::MainMenu,
             main_menu_selected: 0,
+            pause_menu_selected: 0,
+            previous_phase: None,
             running: true,
             smoothed_dt: 1.0 / 60.0,
             total_gore_spawned: 0,
@@ -2077,6 +2090,7 @@ impl GameState {
             GamePhase::ApproachPlanet => self.update_approach(dt),
             GamePhase::DropSequence => self.update_drop_sequence(dt),
             GamePhase::Playing => self.update_gameplay(dt),
+            GamePhase::Paused => self.update_paused(dt),
             GamePhase::Victory | GamePhase::Defeat => {
                 self.update_camera_only(dt);
             }
@@ -2174,6 +2188,28 @@ impl GameState {
         }
 
         self.game_messages.update(dt);
+    }
+
+    /// Update when paused: only menu input and message decay.
+    fn update_paused(&mut self, dt: f32) {
+        self.game_messages.update(dt);
+    }
+
+    /// Transition to main menu (from pause or ship). Resets cursor and menu state.
+    fn transition_to_main_menu(&mut self) {
+        self.phase = GamePhase::MainMenu;
+        self.main_menu_selected = 0;
+        self.pause_menu_selected = 0;
+        self.previous_phase = None;
+        self.ship_state = None;
+        self.drop_pod = None;
+        self.extraction = None;
+        self.current_planet_idx = None;
+        self.camera.transform.position = Vec3::new(0.0, 0.0, 1200.0);
+        self.camera.set_yaw_pitch(0.0, -0.15);
+        self.renderer.window.set_cursor_visible(true);
+        let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::None);
+        self.input.set_cursor_locked(false);
     }
 
     /// Update while aboard the Federation destroyer.
@@ -5470,9 +5506,56 @@ impl GameState {
                     self.input.process_keyboard(key, event.state);
 
                     if key == KeyCode::Escape && event.state.is_pressed() {
-                        let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::None);
-                        self.renderer.window.set_cursor_visible(true);
-                        self.input.set_cursor_locked(false);
+                        if self.phase == GamePhase::Paused {
+                            // Resume or act on selection: Escape = Resume
+                            if self.pause_menu_selected == 0 {
+                                if let Some(prev) = self.previous_phase.take() {
+                                    self.phase = prev;
+                                    let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::Locked)
+                                        .or_else(|_| self.renderer.window.set_cursor_grab(CursorGrabMode::Confined));
+                                    self.renderer.window.set_cursor_visible(false);
+                                    self.input.set_cursor_locked(true);
+                                }
+                            }
+                        } else if self.phase == GamePhase::Playing || self.phase == GamePhase::InShip {
+                            // Open pause menu
+                            self.previous_phase = Some(self.phase);
+                            self.phase = GamePhase::Paused;
+                            self.pause_menu_selected = 0;
+                            let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::None);
+                            self.renderer.window.set_cursor_visible(true);
+                            self.input.set_cursor_locked(false);
+                        } else {
+                            let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::None);
+                            self.renderer.window.set_cursor_visible(true);
+                            self.input.set_cursor_locked(false);
+                        }
+                    }
+
+                    // Pause menu navigation and confirm
+                    if self.phase == GamePhase::Paused && event.state.is_pressed() {
+                        match key {
+                            KeyCode::ArrowUp | KeyCode::KeyW => {
+                                self.pause_menu_selected = self.pause_menu_selected.saturating_sub(1);
+                            }
+                            KeyCode::ArrowDown | KeyCode::KeyS => {
+                                self.pause_menu_selected = (self.pause_menu_selected + 1).min(1);
+                            }
+                            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
+                                if self.pause_menu_selected == 0 {
+                                    if let Some(prev) = self.previous_phase.take() {
+                                        self.phase = prev;
+                                        let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::Locked)
+                                            .or_else(|_| self.renderer.window.set_cursor_grab(CursorGrabMode::Confined));
+                                        self.renderer.window.set_cursor_visible(false);
+                                        self.input.set_cursor_locked(true);
+                                    }
+                                } else {
+                                    self.transition_to_main_menu();
+                                }
+                            }
+                            _ => {}
+                        }
                     }
 
                     // Debug controls
@@ -5674,9 +5757,10 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_none() {
+            let config = config::GameConfig::load();
             let window_attrs = Window::default_attributes()
                 .with_title("OpenSST - Starship Troopers FPS [Euphoria Physics]")
-                .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+                .with_inner_size(winit::dpi::LogicalSize::new(config.window_width, config.window_height));
 
             let window = match event_loop.create_window(window_attrs) {
                 Ok(w) => Arc::new(w),

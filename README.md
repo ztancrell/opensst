@@ -72,7 +72,7 @@ Open Starship Troopers — a fast, realistic Starship Troopers-inspired first-pe
 | **1/2/Scroll** | Switch weapons |
 | **Q** | Use ability |
 | **Tab** | Toggle HUD |
-| **Escape** | Release cursor |
+| **Escape** | Pause (in mission/ship) or release cursor |
 
 ### Debug Controls
 | Key | Action |
@@ -81,6 +81,10 @@ Open Starship Troopers — a fast, realistic Starship Troopers-inspired first-pe
 | **F2** | Heal player |
 | **F3** | Refill ammo |
 | **F4** | Kill all bugs (test ragdolls) |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test, and submit changes.
 
 ## Building
 
@@ -95,6 +99,10 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # From the repo root (after cloning), build and run
 cargo run --release
 ```
+
+## Configuration
+
+Optional **`config.ron`** in the current directory (or create from the repo’s `config.ron` template) sets window size, vsync, fullscreen, and sensitivity. If missing, defaults are used (1280×720, vsync on).
 
 ## Saves
 

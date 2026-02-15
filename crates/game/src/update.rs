@@ -312,8 +312,7 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
         grenade.age += dt;
         let is_in_water = state.chunk_manager.is_in_water(grenade.position.x, grenade.position.z);
         let water_level = state.chunk_manager.water_level();
-        if is_in_water && water_level.is_some() {
-            let wl = water_level.unwrap();
+        if let Some(wl) = water_level.filter(|_| is_in_water) {
             // Buoyancy: float toward surface. Grenades are light.
             let depth = wl - grenade.position.y;
             if depth > 0.0 {
@@ -1183,8 +1182,7 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
         casing.lifetime -= dt;
         let is_in_water = state.chunk_manager.is_in_water(casing.position.x, casing.position.z);
         let water_level = state.chunk_manager.water_level();
-        if is_in_water && water_level.is_some() {
-            let wl = water_level.unwrap();
+        if let Some(wl) = water_level.filter(|_| is_in_water) {
             let depth = wl - casing.position.y;
             if depth > 0.0 {
                 casing.velocity.y += 8.0 * dt; // brass floats slightly

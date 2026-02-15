@@ -43,7 +43,7 @@ A broad list of things that could be improved. Use as a backlog; pick by priorit
 
 ## 4. Error handling & robustness
 
-- [ ] **Replace `unwrap()` / `expect()`** – There are several in `main.rs`, `render/mod.rs`, `update.rs`; prefer `?` or `if let Some` / `match` and log or return errors.
+- [x] **Replace `unwrap()` / `expect()`** – Replaced in main.rs (deltas), render (bug_instances), update (water_level). A few may remain elsewhere.
 - [x] **Window creation** – `event_loop.create_window(...).unwrap()` in `App::resumed`; handle failure and show a message instead of panicking.
 - [ ] **Render errors** – Already logged in `handle_window_event`; consider a user-visible “Render error, check logs” message or fallback.
 - [ ] **Save load failure** – If `opensst_save.ron` is corrupt or missing, document behavior and optionally show “No save found, starting fresh.”
@@ -53,8 +53,8 @@ A broad list of things that could be improved. Use as a backlog; pick by priorit
 
 ## 5. Configuration & data-driven design
 
-- [ ] **Config file** – e.g. `config.ron` or `settings.toml` for window size, vsync, fullscreen, volume, sensitivity, so users and devs don’t recompile.
-- [ ] **Default window size** – 1280×720 is hardcoded; move to config or detect primary monitor.
+- [x] **Config file** – `config.ron` for window size, vsync, fullscreen, sensitivity. Loaded at startup; see `config.rs` and repo `config.ron`.
+- [x] **Default window size** – Now in config; defaults 1280×720.
 - [ ] **Keybindings** – Input is hardcoded (WASD, R, Q, etc.); add a keymap (struct or file) and look up by action so rebinding is possible later.
 - [ ] **Magic numbers** – Replace scattered literals (e.g. spawn radius 15–20, flow field 100×100, chunk counts, render distances) with named constants or config.
 - [ ] **Mission parameters** – Wave counts, kill targets, timers (e.g. “25 bugs”, “5:00”) are in code; move to data (RON/JSON) or mission definition structs.
@@ -94,9 +94,9 @@ A broad list of things that could be improved. Use as a backlog; pick by priorit
 
 ## 8. UX & polish
 
-- [ ] **Options / settings menu** – Volume, sensitivity, keybinds, graphics (vsync, resolution, fullscreen), FOV.
-- [ ] **Pause menu** – Proper pause state (already have `GamePhase::Paused`?); resume, options, quit to menu.
-- [ ] **Quit to main menu** – From ship or pause; don’t force quit app.
+- [ ] **Options / settings menu** – Volume, sensitivity, keybinds, graphics (vsync, resolution, fullscreen), FOV. (Config file exists; in-game UI not yet.)
+- [x] **Pause menu** – Escape in Playing/InShip opens pause; Resume / Quit to main menu; cursor shown.
+- [x] **Quit to main menu** – From pause menu (“Quit to main menu”); resets to main menu without exiting.
 - [ ] **Loading indicator** – During initial load or planet switch so the player knows the game is working.
 - [ ] **Death screen** – “You died” + stats + respawn/return to ship (if you add respawn) or “Mission failed.”
 - [ ] **Tutorial or first-time hints** – Basic controls, stratagems, extraction; can be minimal (tooltips or one-time messages).

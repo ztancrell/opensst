@@ -45,6 +45,29 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
         return tb;
     }
 
+    // ---- Pause menu ----
+    if state.phase == GamePhase::Paused {
+        let title = "PAUSED";
+        let title_scale = 2.0;
+        let title_w = title.len() as f32 * 8.0 * title_scale;
+        tb.add_text(sw * 0.5 - title_w * 0.5, sh * 0.3, title, title_scale, [0.9, 0.88, 0.75, 1.0]);
+
+        let resume_sel = state.pause_menu_selected == 0;
+        let quit_sel = state.pause_menu_selected == 1;
+        let menu_y = sh * 0.5;
+        let menu_x = sw * 0.5 - 90.0;
+        let item_h = 28.0;
+        let item_scale = 1.5;
+        let sel = [0.95, 0.9, 0.7, 1.0];
+        let unsel = [0.6, 0.62, 0.68, 1.0];
+
+        tb.add_text(menu_x, menu_y, "Resume", item_scale, if resume_sel { sel } else { unsel });
+        tb.add_text(menu_x, menu_y + item_h, "Quit to main menu", item_scale, if quit_sel { sel } else { unsel });
+        tb.add_text(sw * 0.5 - 120.0, menu_y + item_h * 2.5, "Escape / Enter to select", 1.0, gray);
+
+        return tb;
+    }
+
     let warp_active = state.warp_sequence.is_some();
     let approach_in_space = state.phase == GamePhase::ApproachPlanet && state.approach_flight_state.is_some();
     let ship_interior_visible = warp_active

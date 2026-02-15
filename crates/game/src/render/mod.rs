@@ -126,10 +126,9 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 transform.to_matrix()
             };
 
-            bug_instances_by_type
-                .get_mut(&bug.bug_type)
-                .unwrap()
-                .push(InstanceData::new(final_transform.to_cols_array_2d(), color));
+            if let Some(instances) = bug_instances_by_type.get_mut(&bug.bug_type) {
+                instances.push(InstanceData::new(final_transform.to_cols_array_2d(), color));
+            }
         }
 
         // Gore instances (skip very close to camera to avoid tunnel/quads in face)
