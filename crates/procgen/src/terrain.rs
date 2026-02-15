@@ -1,12 +1,25 @@
 //! Terrain generation using noise functions.
 //! Includes procedural water: lakes, streams, rivers, and ocean.
+//!
+//! **Seed-based determinism:** All noise is derived from `config.seed` (planet seed) so that
+//! the same seed always produces the same terrain at every (world_x, world_z), regardless of
+//! chunk load order — Minecraft-style replayability.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use noise::{NoiseFn, Perlin, Simplex};
-use rand::prelude::*;
 
 use crate::biome::PlanetBiomes;
+
+/// Derive a deterministic u32 noise seed from a world seed and an offset.
+/// Same (seed, offset) always gives the same result so terrain is reproducible.
+#[inline]
+fn deterministic_noise_seed(seed: u64, offset: u64) -> u32 {
+    ((seed.wrapping_add(offset))
+        .wrapping_mul(0x9e3779b97f4a7c15_u64)
+        .wrapping_add(offset.wrapping_mul(0x6c078965_u64))
+        >> 32) as u32
+}
 
 /// Vertex for terrain mesh (includes biome color).
 #[repr(C)]
@@ -107,10 +120,12 @@ impl TerrainData {
     ///
     /// Uses a padded grid (1 extra vertex on each edge) to compute normals that are
     /// consistent across chunk boundaries, eliminating visible seams between chunks.
+    ///
+    /// Noise seeds are derived only from `config.seed` so the same planet seed yields
+    /// the same height at every world position, independent of chunk load order.
     pub fn generate(config: TerrainConfig, planet_biomes: Option<&PlanetBiomes>) -> Self {
-        let mut rng = StdRng::seed_from_u64(config.seed);
-        let perlin = Perlin::new(rng.gen());
-        let simplex = Simplex::new(rng.gen());
+        let perlin = Perlin::new(deterministic_noise_seed(config.seed, 0));
+        let simplex = Simplex::new(deterministic_noise_seed(config.seed, 1));
 
         let res = config.resolution as usize;
         let step = config.size / (config.resolution - 1) as f32;
@@ -121,8 +136,8 @@ impl TerrainData {
         let padded_count = padded_res * padded_res;
         let mut padded_vertices = Vec::with_capacity(padded_count);
         let mut raw_heights: Vec<f32> = Vec::with_capacity(padded_count);
-        let water_perlin = Perlin::new(rng.gen());
-        let water_simplex = Simplex::new(rng.gen());
+        let water_perlin = Perlin::new(deterministic_noise_seed(config.seed, 2));
+        let water_simplex = Simplex::new(deterministic_noise_seed(config.seed, 3));
         let mut water_level_world = config.water_level.map(|wl| wl * config.height_scale);
         if let (Some(wl), Some(vs)) = (water_level_world, config.voxel_size) {
             water_level_world = Some(quantize_height(wl, vs));
@@ -388,9 +403,8 @@ impl TerrainData {
             Some(wl) => wl * self.config.height_scale,
             None => return,
         };
-        let mut rng = StdRng::seed_from_u64(self.config.seed);
-        let water_perlin = Perlin::new(rng.gen());
-        let water_simplex = Simplex::new(rng.gen());
+        let water_perlin = Perlin::new(deterministic_noise_seed(self.config.seed, 2));
+        let water_simplex = Simplex::new(deterministic_noise_seed(self.config.seed, 3));
         let (water_vertices, water_indices) = Self::generate_water_mesh(
             &self.vertices,
             &self.heightmap,
@@ -625,5 +639,52 @@ impl TerrainChunk {
             data: TerrainData::generate(config, None),
             lod: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Same planet seed and chunk config must produce identical heightmaps (replayability).
+    #[test]
+    fn terrain_deterministic_same_seed() {
+        let seed = 98765_u64;
+        let config = TerrainConfig {
+            size: 64.0,
+            resolution: 24,
+            height_scale: 15.0,
+            frequency: 0.02,
+            offset_x: 0.0,
+            offset_z: 0.0,
+            seed,
+            ..Default::default()
+        };
+        let a = TerrainData::generate(config.clone(), None);
+        let b = TerrainData::generate(config, None);
+        assert_eq!(a.heightmap.len(), b.heightmap.len());
+        for (i, (&ha, &hb)) in a.heightmap.iter().zip(b.heightmap.iter()).enumerate() {
+            assert_eq!(ha, hb, "heightmap[{}] should match for same seed", i);
+        }
+    }
+
+    /// Different seeds must produce different terrain.
+    #[test]
+    fn terrain_different_seed_different_heights() {
+        let config_a = TerrainConfig {
+            size: 64.0,
+            resolution: 24,
+            seed: 11111,
+            offset_x: 0.0,
+            offset_z: 0.0,
+            ..Default::default()
+        };
+        let config_b = TerrainConfig {
+            seed: 22222,
+            ..config_a.clone()
+        };
+        let a = TerrainData::generate(config_a, None);
+        let b = TerrainData::generate(config_b, None);
+        assert_ne!(a.heightmap, b.heightmap);
     }
 }

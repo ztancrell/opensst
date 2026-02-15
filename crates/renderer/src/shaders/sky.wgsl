@@ -460,54 +460,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         atmo_color = mix(atmo_color, sky.ground_color.rgb * 0.6, ground_blend);
     }
 
-    // ===== SPACE BACKGROUND =====
-    // Starfield / Star Citizen / Helldivers 2: near-black with subtle cool cosmic tint
-    var space_color = vec3<f32>(0.001, 0.002, 0.004);
-
-    // Large-scale cosmic background: subtle blue/purple depth (Starfield style)
-    let cosmic_bg = fbm(view_dir * 0.6, 3);
-    space_color += vec3<f32>(0.003, 0.005, 0.012) * cosmic_bg;
-
-    // Starfield - crisp, varied brightness, cooler palette
-    let star_vis_surface = smoothstep(0.10, 0.40, night_factor) * smoothstep(-0.08, 0.10, up_dot);
-    let star_visibility = mix(star_vis_surface, 1.0, space_blend);
-    let star_cloud_block = 1.0 - cloud_density * 0.80 * (1.0 - space_blend);
-    let star_space_boost = mix(1.0, 2.5, space_blend);
-    space_color += starfield(view_dir, time) * star_visibility * star_cloud_block * star_space_boost;
-
-    // Milky way - cooler, blue-white band (Star Citizen / HD2)
-    let mw_vis = mix(star_vis_surface * 0.6, 1.0, space_blend);
-    let mw_boost = mix(1.0, 2.0, space_blend);
-    space_color += milky_way(view_dir, time) * mw_vis * star_cloud_block * mw_boost;
-
-    // Nebulae - subtle blue/purple/violet gas clouds (Starfield aesthetic)
-    let neb_vis_surface = smoothstep(0.15, 0.50, night_factor) * smoothstep(-0.05, 0.10, up_dot);
-    let neb_vis = mix(neb_vis_surface * 0.5, 1.0, space_blend);
-    let neb_boost = mix(1.0, 1.4, space_blend);
-    space_color += nebula(view_dir, time) * neb_vis * star_cloud_block * neb_boost;
-
-    // Cosmic dust: subtle cool-toned filaments (Starfield / Star Citizen)
+    // ===== SPACE BACKGROUND (default everywhere until in atmosphere) =====
+    // Unified space skybox: pitch black + twinkling stars (Starship Troopers aesthetic).
+    // Used for: main menu, ship interior, orbit, approach, and drop pod above atmosphere.
+    // Only when descending into atmosphere (space_blend decreases) do we blend to the
+    // time/weather/effects-driven atmospheric sky below.
+    let twinkle_time = time * 1.8;
+    var space_color = vec3<f32>(0.0, 0.0, 0.0);
+    space_color += starfield(view_dir, twinkle_time) * 1.2;
     {
-        let dust1 = fbm(view_dir * 1.2, 4) * 0.018;
-        let dust2 = fbm(view_dir * 0.7 + vec3<f32>(4.0, 0.0, 2.0), 3) * 0.012;
-        let dust_hue = fbm(view_dir * 0.5, 2);
-        let cool_dust = vec3<f32>(0.015, 0.025, 0.05);   // faint blue
-        let violet_dust = vec3<f32>(0.02, 0.01, 0.04);   // subtle violet
-        let deep_dust = vec3<f32>(0.008, 0.012, 0.025);  // deep blue
-        var dust_color = mix(deep_dust, cool_dust, dust_hue);
-        dust_color = mix(dust_color, violet_dust, smoothstep(0.5, 0.7, dust_hue));
-        let dust_vis = mix(0.2, 1.0, space_blend);
-        space_color += dust_color * (dust1 + dust2) * dust_vis;
-    }
-
-    // Star cluster regions - cooler, brighter (HD2 / Star Citizen)
-    {
-        let cluster_pos = view_dir * 3.5;
-        let cluster_noise = fbm(cluster_pos, 4);
-        let cluster = smoothstep(0.62, 0.78, cluster_noise);
-        let cluster_glow = vec3<f32>(0.08, 0.12, 0.22) * cluster * 0.5;
-        let cluster_vis = mix(0.2, 1.0, space_blend);
-        space_color += cluster_glow * cluster_vis;
+        let grid = view_dir * 1400.0;
+        let cell = floor(grid);
+        let h1 = hash(cell);
+        let h2 = hash(cell + vec3<f32>(31.1, 17.3, 53.7));
+        if (h1 > 0.94) {
+            let frac_pos = fract(grid) - 0.5;
+            let d = length(frac_pos);
+            let sparkle = smoothstep(0.12, 0.0, d) * 0.4;
+            let twinkle = sin(twinkle_time * 2.5 + h2 * 400.0) * 0.25 + 0.75;
+            space_color += vec3<f32>(0.92, 0.95, 1.0) * sparkle * twinkle;
+        }
     }
 
     // ===== BLEND ATMOSPHERE <-> SPACE =====

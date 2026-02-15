@@ -53,7 +53,8 @@ Open Starship Troopers — a fast, realistic Starship Troopers-inspired first-pe
 
 ### Procedural World
 - **Planet generation** with unique biomes
-- **Terrain generation** using layered noise
+- **Seed-based replayability** — same universe/planet seed always produces the same world (terrain, biomes, scatter); share seeds for reproducible runs
+- **Terrain generation** using layered noise (deterministic per seed)
 - **Flow-field pathfinding** for horde AI
 - **Dynamic spawning** around the player
 

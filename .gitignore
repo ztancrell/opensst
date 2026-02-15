@@ -19,4 +19,3 @@ Thumbs.db
 *.log
 .env
 .env.local
-/docs/

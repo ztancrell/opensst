@@ -86,8 +86,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dither = (bayer - 0.5) * cinematic.dither_strength;
     color += dither;
 
-    // --- Lift / Gamma / Gain (MIRO + SST color grading) ---
-    // Lift: warm saturated shadows (orange/amber military palette)
+    // --- Lift / Gamma / Gain (color grading) ---
+    // Lift: shadow tint (neutral = no orange/amber filter)
     color = color + cinematic.lift * (1.0 - color);
     // Gamma: slight rolloff for stylized midtones
     color = pow(max(color, vec3<f32>(0.0001)), cinematic.inv_gamma);

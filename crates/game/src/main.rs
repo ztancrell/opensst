@@ -138,6 +138,8 @@ pub struct GameState {
     galaxy_map_open: bool,
     galaxy_map_selected: usize,
     warp_sequence: Option<WarpSequence>,
+    /// When true, warp completion returns to ship interior (FTL from war table) instead of space.
+    warp_return_to_ship: bool,
 
     // Drop pod deployment
     drop_pod: Option<DropPodSequence>,
@@ -719,7 +721,7 @@ pub(crate) fn roger_young_interior_parts() -> Vec<ShipInteriorPart> {
     let floor_color = [0.10, 0.11, 0.14, 1.0];
     let ceiling = [0.14, 0.15, 0.18, 1.0];
     let accent_blue = [0.15, 0.25, 0.45, 1.0];
-    let light_warm = [1.0, 0.9, 0.7, 0.9];
+    let light_warm = [0.92, 0.94, 0.98, 0.9];  // Cool white fluorescent (no orange piss filter)
     let light_strip = [0.4, 0.6, 1.0, 0.7];
     let red_alert = [0.8, 0.1, 0.05, 0.6];
     let console_glow = [0.2, 0.5, 0.8, 0.8];
@@ -738,17 +740,19 @@ pub(crate) fn roger_young_interior_parts() -> Vec<ShipInteriorPart> {
         ShipInteriorPart { pos: Vec3::new(0.0, -0.05, 6.0), scale: Vec3::new(18.0, 0.05, 0.3), color: grate, mesh_type: 0 },
 
         // ══════ WALLS ══════
-        // Port wall (left, -X) — split for window cutout (real-time space view, 2005 ST style)
-        ShipInteriorPart { pos: Vec3::new(-10.0, 2.0, -9.0), scale: Vec3::new(0.4, 4.5, 12.0), color: steel, mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(-10.0, 2.0, 9.0), scale: Vec3::new(0.4, 4.5, 12.0), color: steel, mesh_type: 0 },
-        // Starboard wall (right, +X) — split for window cutout
-        ShipInteriorPart { pos: Vec3::new(10.0, 2.0, -9.0), scale: Vec3::new(0.4, 4.5, 12.0), color: steel, mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(10.0, 2.0, 9.0), scale: Vec3::new(0.4, 4.5, 12.0), color: steel, mesh_type: 0 },
-        // Forward wall (+Z) — frame only so main viewscreen shows real-time space/planets/destroyers
-        ShipInteriorPart { pos: Vec3::new(-7.625, 2.0, 15.0), scale: Vec3::new(4.75, 4.5, 0.4), color: steel, mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(7.625, 2.0, 15.0), scale: Vec3::new(4.75, 4.5, 0.4), color: steel, mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(0.0, 4.0, 15.0), scale: Vec3::new(10.5, 1.0, 0.4), color: steel, mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(0.0, 0.75, 15.0), scale: Vec3::new(10.5, 1.5, 0.4), color: steel, mesh_type: 0 },
+        // Port wall (left, -X) — two window cutouts: main (z -8..8) and aft (z -12..-9)
+        ShipInteriorPart { pos: Vec3::new(-10.0, 2.0, -13.5), scale: Vec3::new(0.4, 4.5, 3.0), color: steel, mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-10.0, 2.0, -8.5), scale: Vec3::new(0.4, 4.5, 1.0), color: steel, mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-10.0, 2.0, 11.5), scale: Vec3::new(0.4, 4.5, 7.0), color: steel, mesh_type: 0 },
+        // Starboard wall (right, +X) — same two window cutouts
+        ShipInteriorPart { pos: Vec3::new(10.0, 2.0, -13.5), scale: Vec3::new(0.4, 4.5, 3.0), color: steel, mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(10.0, 2.0, -8.5), scale: Vec3::new(0.4, 4.5, 1.0), color: steel, mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(10.0, 2.0, 11.5), scale: Vec3::new(0.4, 4.5, 7.0), color: steel, mesh_type: 0 },
+        // Forward wall (+Z) — larger viewscreen opening (real-time space/planets)
+        ShipInteriorPart { pos: Vec3::new(-6.5, 2.0, 15.0), scale: Vec3::new(3.5, 4.5, 0.4), color: steel, mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(6.5, 2.0, 15.0), scale: Vec3::new(3.5, 4.5, 0.4), color: steel, mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(0.0, 4.25, 15.0), scale: Vec3::new(14.0, 0.5, 0.4), color: steel, mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(0.0, 0.6, 15.0), scale: Vec3::new(14.0, 0.5, 0.4), color: steel, mesh_type: 0 },
         // Aft wall with door opening (-Z) — split into two halves
         ShipInteriorPart { pos: Vec3::new(-6.5, 2.0, -15.0), scale: Vec3::new(7.0, 4.5, 0.4), color: steel, mesh_type: 0 },
         ShipInteriorPart { pos: Vec3::new(6.5, 2.0, -15.0), scale: Vec3::new(7.0, 4.5, 0.4), color: steel, mesh_type: 0 },
@@ -780,16 +784,16 @@ pub(crate) fn roger_young_interior_parts() -> Vec<ShipInteriorPart> {
         ShipInteriorPart { pos: Vec3::new(0.0, 1.1, 2.0), scale: Vec3::new(3.5, 0.05, 2.5), color: console_glow, mesh_type: 2 },
 
         // ══════ BRIDGE CONSOLES (forward wall) ══════
-        // Main viewscreen frame (border only — center is open for real-time space/planets/destroyers)
-        ShipInteriorPart { pos: Vec3::new(-4.75, 2.5, 14.6), scale: Vec3::new(0.5, 2.5, 0.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(4.75, 2.5, 14.6), scale: Vec3::new(0.5, 2.5, 0.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(0.0, 3.375, 14.6), scale: Vec3::new(10.0, 0.25, 0.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(0.0, 1.625, 14.6), scale: Vec3::new(10.0, 0.25, 0.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        // Viewscreen bezel glow (2005 Starship Troopers style — subtle edge glow, no solid fill)
-        ShipInteriorPart { pos: Vec3::new(-4.6, 2.5, 14.52), scale: Vec3::new(0.08, 2.4, 0.06), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
-        ShipInteriorPart { pos: Vec3::new(4.6, 2.5, 14.52), scale: Vec3::new(0.08, 2.4, 0.06), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
-        ShipInteriorPart { pos: Vec3::new(0.0, 3.3, 14.52), scale: Vec3::new(9.0, 0.08, 0.06), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
-        ShipInteriorPart { pos: Vec3::new(0.0, 1.7, 14.52), scale: Vec3::new(9.0, 0.08, 0.06), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        // Main viewscreen frame — larger opening (x ±5.5, y 1.1..3.75) for real-time space/planets
+        ShipInteriorPart { pos: Vec3::new(-5.8, 2.4, 14.6), scale: Vec3::new(0.4, 3.0, 0.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(5.8, 2.4, 14.6), scale: Vec3::new(0.4, 3.0, 0.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(0.0, 3.95, 14.6), scale: Vec3::new(12.0, 0.2, 0.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(0.0, 0.85, 14.6), scale: Vec3::new(12.0, 0.2, 0.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        // Viewscreen bezel glow
+        ShipInteriorPart { pos: Vec3::new(-5.6, 2.4, 14.52), scale: Vec3::new(0.06, 2.8, 0.06), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        ShipInteriorPart { pos: Vec3::new(5.6, 2.4, 14.52), scale: Vec3::new(0.06, 2.8, 0.06), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        ShipInteriorPart { pos: Vec3::new(0.0, 3.8, 14.52), scale: Vec3::new(11.0, 0.06, 0.06), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        ShipInteriorPart { pos: Vec3::new(0.0, 0.95, 14.52), scale: Vec3::new(11.0, 0.06, 0.06), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
         // Helm console (forward, below viewscreen)
         ShipInteriorPart { pos: Vec3::new(0.0, 0.7, 13.0), scale: Vec3::new(6.0, 0.8, 2.0), color: dark_steel, mesh_type: 0 },
         ShipInteriorPart { pos: Vec3::new(0.0, 1.15, 13.5), scale: Vec3::new(5.5, 0.1, 1.2), color: console_glow, mesh_type: 2 },
@@ -797,21 +801,35 @@ pub(crate) fn roger_young_interior_parts() -> Vec<ShipInteriorPart> {
         ShipInteriorPart { pos: Vec3::new(-2.0, 0.5, 12.0), scale: Vec3::new(0.6, 1.0, 0.6), color: dark_steel, mesh_type: 0 },
         ShipInteriorPart { pos: Vec3::new(2.0, 0.5, 12.0), scale: Vec3::new(0.6, 1.0, 0.6), color: dark_steel, mesh_type: 0 },
 
-        // ══════ SIDE WINDOWS (port/starboard — real-time space, 2005 ST style) ══════
-        // Port window frame (thin bezel around cutout z=-3..3, y~0.5..3.5)
-        ShipInteriorPart { pos: Vec3::new(-9.8, 2.0, -3.0), scale: Vec3::new(0.06, 3.0, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(-9.8, 2.0, 3.0), scale: Vec3::new(0.06, 3.0, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(-9.8, 3.5, 0.0), scale: Vec3::new(0.06, 0.12, 6.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(-9.8, 0.5, 0.0), scale: Vec3::new(0.06, 0.12, 6.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(-9.78, 3.4, 0.0), scale: Vec3::new(0.02, 0.08, 6.0), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
-        ShipInteriorPart { pos: Vec3::new(-9.78, 0.6, 0.0), scale: Vec3::new(0.02, 0.08, 6.0), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
-        // Starboard window frame
-        ShipInteriorPart { pos: Vec3::new(9.8, 2.0, -3.0), scale: Vec3::new(0.06, 3.0, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(9.8, 2.0, 3.0), scale: Vec3::new(0.06, 3.0, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(9.8, 3.5, 0.0), scale: Vec3::new(0.06, 0.12, 6.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(9.8, 0.5, 0.0), scale: Vec3::new(0.06, 0.12, 6.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
-        ShipInteriorPart { pos: Vec3::new(9.78, 3.4, 0.0), scale: Vec3::new(0.02, 0.08, 6.0), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
-        ShipInteriorPart { pos: Vec3::new(9.78, 0.6, 0.0), scale: Vec3::new(0.02, 0.08, 6.0), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        // ══════ SIDE WINDOWS (port/starboard — large + aft window, real-time space) ══════
+        // Port: main window frame (cutout z -8..8, y 0.2..3.8) — thin bezel
+        ShipInteriorPart { pos: Vec3::new(-9.8, 2.0, -8.0), scale: Vec3::new(0.06, 3.6, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-9.8, 2.0, 8.0), scale: Vec3::new(0.06, 3.6, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-9.8, 3.8, 0.0), scale: Vec3::new(0.06, 0.12, 16.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-9.8, 0.2, 0.0), scale: Vec3::new(0.06, 0.12, 16.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-9.78, 3.65, 0.0), scale: Vec3::new(0.02, 0.1, 16.0), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        ShipInteriorPart { pos: Vec3::new(-9.78, 0.35, 0.0), scale: Vec3::new(0.02, 0.1, 16.0), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        // Port: aft window frame (cutout z -12..-9)
+        ShipInteriorPart { pos: Vec3::new(-9.8, 2.0, -12.0), scale: Vec3::new(0.06, 3.2, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-9.8, 2.0, -9.0), scale: Vec3::new(0.06, 3.2, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-9.8, 3.6, -10.5), scale: Vec3::new(0.06, 0.12, 3.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-9.8, 0.4, -10.5), scale: Vec3::new(0.06, 0.12, 3.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(-9.78, 3.45, -10.5), scale: Vec3::new(0.02, 0.08, 2.8), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        ShipInteriorPart { pos: Vec3::new(-9.78, 0.55, -10.5), scale: Vec3::new(0.02, 0.08, 2.8), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        // Starboard: main window frame
+        ShipInteriorPart { pos: Vec3::new(9.8, 2.0, -8.0), scale: Vec3::new(0.06, 3.6, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(9.8, 2.0, 8.0), scale: Vec3::new(0.06, 3.6, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(9.8, 3.8, 0.0), scale: Vec3::new(0.06, 0.12, 16.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(9.8, 0.2, 0.0), scale: Vec3::new(0.06, 0.12, 16.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(9.78, 3.65, 0.0), scale: Vec3::new(0.02, 0.1, 16.0), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        ShipInteriorPart { pos: Vec3::new(9.78, 0.35, 0.0), scale: Vec3::new(0.02, 0.1, 16.0), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        // Starboard: aft window frame
+        ShipInteriorPart { pos: Vec3::new(9.8, 2.0, -12.0), scale: Vec3::new(0.06, 3.2, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(9.8, 2.0, -9.0), scale: Vec3::new(0.06, 3.2, 0.12), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(9.8, 3.6, -10.5), scale: Vec3::new(0.06, 0.12, 3.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(9.8, 0.4, -10.5), scale: Vec3::new(0.06, 0.12, 3.2), color: [0.06, 0.08, 0.12, 1.0], mesh_type: 0 },
+        ShipInteriorPart { pos: Vec3::new(9.78, 3.45, -10.5), scale: Vec3::new(0.02, 0.08, 2.8), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
+        ShipInteriorPart { pos: Vec3::new(9.78, 0.55, -10.5), scale: Vec3::new(0.02, 0.08, 2.8), color: [0.08, 0.15, 0.28, 0.5], mesh_type: 2 },
         // ══════ SIDE CONSOLES ══════
         // Port side crew stations
         ShipInteriorPart { pos: Vec3::new(-9.0, 0.7, -5.0), scale: Vec3::new(1.5, 0.8, 8.0), color: dark_steel, mesh_type: 0 },
@@ -2048,6 +2066,7 @@ impl GameState {
             galaxy_map_open: false,
             galaxy_map_selected: 0,
             warp_sequence: None,
+            warp_return_to_ship: false,
             drop_pod: None,
             squad_drop_pods: None,
             ship_state: None,
@@ -2319,6 +2338,26 @@ impl GameState {
 
     /// Update while aboard the Federation destroyer.
     fn update_ship(&mut self, dt: f32) {
+        // FTL from war table: advance warp while InShip (gameplay() only runs when Playing)
+        if let Some(ref mut warp) = self.warp_sequence {
+            warp.timer += dt;
+            self.camera.transform.position = Vec3::new(0.0, 2.2, 14.0);
+            self.camera.set_yaw_pitch(0.0, 0.0);
+            self.renderer.update_camera(&self.camera, 0.0);
+            if warp.is_complete() {
+                let target_idx = warp.target_system_idx;
+                let return_to_ship = self.warp_return_to_ship;
+                self.warp_sequence = None;
+                self.warp_return_to_ship = false;
+                self.arrive_at_system(target_idx);
+                if return_to_ship {
+                    self.begin_ship_phase(0);
+                }
+            }
+            self.game_messages.update(dt);
+            return;
+        }
+
         if let Some(ref mut ship) = self.ship_state {
             ship.timer += dt;
             // Update cloth flag physics
@@ -2406,19 +2445,23 @@ impl GameState {
         let num_systems = self.universe.systems.len();
         let num_planets = self.current_system.bodies.len();
 
-        // Change star system (↑/↓ or W/Q) — new procgen system and planets with distinct biomes
+        // Change star system (↑/↓ or W/Q) — FTL jump to new system (Helldivers 2 style), then return to ship
         if war_table_active && num_systems > 0 {
             let next_sys = self.input.is_key_pressed(KeyCode::ArrowUp) || self.input.is_key_pressed(KeyCode::KeyW);
             let prev_sys = self.input.is_key_pressed(KeyCode::ArrowDown) || self.input.is_key_pressed(KeyCode::KeyQ);
             if next_sys {
                 let next_idx = (self.current_system_idx + 1) % num_systems;
-                self.switch_war_table_system(next_idx);
-                self.game_messages.info(format!("War table: {} — {} planets", self.current_system.name, self.current_system.bodies.len()));
+                let sys_name = self.universe.systems[next_idx].name.clone();
+                self.warp_sequence = Some(WarpSequence::new(next_idx));
+                self.warp_return_to_ship = true;
+                self.game_messages.info(format!("FTL jump to {}...", sys_name));
             }
             if prev_sys {
                 let prev_idx = if self.current_system_idx == 0 { num_systems - 1 } else { self.current_system_idx - 1 };
-                self.switch_war_table_system(prev_idx);
-                self.game_messages.info(format!("War table: {} — {} planets", self.current_system.name, self.current_system.bodies.len()));
+                let sys_name = self.universe.systems[prev_idx].name.clone();
+                self.warp_sequence = Some(WarpSequence::new(prev_idx));
+                self.warp_return_to_ship = true;
+                self.game_messages.info(format!("FTL jump to {}...", sys_name));
             }
         }
 
@@ -5196,10 +5239,82 @@ impl GameState {
     }
 
     /// Build celestial body instances for rendering.
+    /// When InShip, places star and planets in ship-local space so the chosen planet is visible through the viewscreen (Helldivers 2 style).
     fn build_celestial_instances(&self) -> Vec<CelestialBodyInstance> {
         let mut instances = Vec::new();
-        let cam_pos = self.camera.position();
 
+        // Ship interior: real-time view out the windows — target planet ahead through viewscreen, star and others in scene
+        if self.phase == GamePhase::InShip {
+            if let Some(ref ship) = self.ship_state {
+                let star = &self.current_system.star;
+                let target_idx = ship.target_planet_idx.min(self.current_system.bodies.len().saturating_sub(1));
+                let ot = self.orbital_time as f32;
+                let n = self.current_system.bodies.len().max(1);
+
+                // Star: above and behind the viewscreen (lights the scene)
+                let star_pos = Vec3::new(0.0, 28.0, 150.0);
+                let star_radius = (star.radius * 0.015).max(3.0).min(8.0);
+                instances.push(CelestialBodyInstance {
+                    position: star_pos.into(),
+                    radius: star_radius,
+                    color: [star.color.x, star.color.y, star.color.z, 1.0],
+                    star_direction: [0.0, 0.0, 0.0, 0.0],
+                    atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                });
+
+                // Target planet: prominent through the forward viewscreen (the one you chose at the war table)
+                let body = &self.current_system.bodies[target_idx];
+                let planet_scale = 0.04; // ship-local scale so visual_radius ~300 -> ~12
+                let target_planet_pos = Vec3::new(0.0, 1.5, 68.0);
+                let target_radius = (body.planet.visual_radius() * planet_scale).max(6.0).min(20.0);
+                let body_to_star = (star_pos - target_planet_pos).normalize();
+                let biome_cfg = body.planet.get_biome_config();
+                let planet_color = biome_cfg.base_color;
+                instances.push(CelestialBodyInstance {
+                    position: target_planet_pos.into(),
+                    radius: target_radius,
+                    color: [planet_color.x, planet_color.y, planet_color.z, 0.3],
+                    star_direction: [body_to_star.x, body_to_star.y, body_to_star.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
+                    atmosphere_color: [
+                        body.planet.atmosphere_color.x,
+                        body.planet.atmosphere_color.y,
+                        body.planet.atmosphere_color.z,
+                        if body.ring_system { 1.0 } else { 0.0 },
+                    ],
+                });
+
+                // Other planets: smaller, in an arc (visible through side windows / viewscreen edges), gentle drift with orbital_time
+                for (i, body) in self.current_system.bodies.iter().enumerate() {
+                    if i == target_idx {
+                        continue;
+                    }
+                    let angle = (i as f32 / n as f32) * std::f32::consts::TAU + ot * 0.12;
+                    let px = angle.cos() * 32.0;
+                    let pz = 72.0 + angle.sin() * 18.0;
+                    let py = 2.0 + (ot * 0.5 + i as f32).sin() * 2.0;
+                    let pos = Vec3::new(px, py, pz);
+                    let radius = (body.planet.visual_radius() * planet_scale * 0.5).max(2.0).min(5.0);
+                    let bts = (star_pos - pos).normalize();
+                    let biome_cfg = body.planet.get_biome_config();
+                    let color = biome_cfg.base_color;
+                    instances.push(CelestialBodyInstance {
+                        position: pos.into(),
+                        radius,
+                        color: [color.x, color.y, color.z, 0.3],
+                        star_direction: [bts.x, bts.y, bts.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
+                        atmosphere_color: [
+                            body.planet.atmosphere_color.x,
+                            body.planet.atmosphere_color.y,
+                            body.planet.atmosphere_color.z,
+                            if body.ring_system { 1.0 } else { 0.0 },
+                        ],
+                    });
+                }
+                return instances;
+            }
+        }
+
+        let cam_pos = self.camera.position();
         // Reference position: if on a planet, offset bodies relative to planet center
         let cam_dvec = if let Some(planet_idx) = self.current_planet_idx {
             let planet_pos = self.current_system.bodies[planet_idx].orbital_position(self.orbital_time);

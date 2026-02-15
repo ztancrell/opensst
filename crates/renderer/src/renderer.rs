@@ -671,7 +671,7 @@ impl Renderer {
             0.03,  // dither_strength
             0.38,  // vignette_strength
             0.42,  // bloom_strength
-            0.06, 0.03, 0.01, 0.4,    // lift, ssao_scale
+            0.0, 0.0, 0.0, 0.4,       // lift (neutral — no orange/amber piss filter), ssao_scale
             0.92, 0.92, 0.92, 0.018,  // inv_gamma, ssao_radius
             1.12, 1.08, 1.05, 0.002,  // gain, ssao_bias
         ];

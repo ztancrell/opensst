@@ -1,8 +1,20 @@
 //! Biome system for varied terrain types.
+//!
+//! **Seed-based determinism:** PlanetBiomes uses deterministic noise seeds derived from
+//! the planet seed so the same seed produces the same biome map at every (x, z).
 
 use glam::Vec3;
 use noise::{NoiseFn, Perlin, Simplex};
 use rand::prelude::*;
+
+/// Derive a deterministic u32 noise seed from a world seed and an offset.
+#[inline]
+fn deterministic_noise_seed(seed: u64, offset: u64) -> u32 {
+    ((seed.wrapping_add(offset))
+        .wrapping_mul(0x9e3779b97f4a7c15_u64)
+        .wrapping_add(offset.wrapping_mul(0x6c078965_u64))
+        >> 32) as u32
+}
 
 /// Types of biomes for Starship Troopers-style planets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -250,8 +262,9 @@ impl PlanetBiomes {
         }
         let biomes: Vec<BiomeType> = available.into_iter().take(num_biomes).collect();
 
-        let biome_noise = Perlin::new(rng.gen());
-        let blend_noise = Simplex::new(rng.gen());
+        // Deterministic noise so biome map is identical for same seed (replayability)
+        let biome_noise = Perlin::new(deterministic_noise_seed(seed, 0));
+        let blend_noise = Simplex::new(deterministic_noise_seed(seed, 1));
 
         Self {
             biomes,

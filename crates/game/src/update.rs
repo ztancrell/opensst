@@ -38,8 +38,13 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
         state.renderer.update_camera(&state.camera, 0.0);
         if warp.is_complete() {
             let target_idx = warp.target_system_idx;
+            let return_to_ship = state.warp_return_to_ship;
             state.warp_sequence = None;
+            state.warp_return_to_ship = false;
             state.arrive_at_system(target_idx);
+            if return_to_ship {
+                state.begin_ship_phase(0);
+            }
         }
         return; // Skip normal gameplay during warp
     }

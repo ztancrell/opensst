@@ -1,4 +1,9 @@
 //! Planet and mission generation system.
+//!
+//! **Seed-based replayability:** `Planet::generate(seed)` is fully deterministic: the same
+//! seed always produces the same planet (name, biomes, size, stats). Terrain and biome
+//! layout are derived from this seed so the same planet seed yields the same world
+//! everywhere (Minecraft-style).
 
 use crate::biome::{BiomeConfig, BiomeType, PlanetBiomes};
 use glam::Vec3;

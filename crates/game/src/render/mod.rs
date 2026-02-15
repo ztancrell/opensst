@@ -41,16 +41,17 @@ pub fn run(state: &mut GameState) -> Result<()> {
         // ========== MINIMAL MAIN MENU (skip all 3D: no celestial, fleet, Roger Young) ==========
         if state.phase == GamePhase::MainMenu {
             state.renderer.update_camera(&state.camera, 0.0);
+            // Space skybox default: atmo_height=0 → pitch black + twinkling stars
             state.renderer.update_sky(
                 0.75,                      // night
                 [0.0, -1.0, 0.0],         // sun down
-                0.0, 0.0, 0.0, 0.0, 0.0,  // no clouds/dust/planet
+                0.0, 0.0, 0.0, 0.0, 0.0,  // no clouds/dust/planet, atmo_height=0 = space
                 [0.02, 0.025, 0.04],
             );
             state.renderer.render_sky(
                 &mut encoder,
                 &scene_view,
-                Some([0.02, 0.025, 0.04, 1.0]), // dark blue-black
+                Some([0.0, 0.0, 0.0, 1.0]), // Pitch black — space skybox (Starship Troopers)
             );
             let (sw, sh) = state.renderer.dimensions();
             let (sw, sh) = (sw as f32, sh as f32);
@@ -349,10 +350,11 @@ pub fn run(state: &mut GameState) -> Result<()> {
         };
 
         // Pass 0: Dynamic sky (clears and draws) -- includes planet sphere from orbit
-        // Force space background: main menu, extraction orbit, or approach flight (piloting)
+        // Force space background: main menu, extraction orbit, approach flight, or ship interior (real-time view out windows)
         let extraction_orbit = state.extraction.as_ref().map_or(false, |e: &ExtractionDropship| e.player_camera_locked());
         let approach_in_space = state.phase == GamePhase::ApproachPlanet && state.approach_flight_state.is_some();
-        let in_space_view = state.phase == GamePhase::MainMenu || extraction_orbit || approach_in_space;
+        let in_ship_interior = state.phase == GamePhase::InShip;
+        let in_space_view = state.phase == GamePhase::MainMenu || extraction_orbit || approach_in_space || in_ship_interior;
         if in_space_view {
             state.renderer.update_camera(&state.camera, 0.0);
         }
@@ -383,7 +385,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
             &mut encoder,
             &scene_view,
             if in_space_view {
-                Some([0.002, 0.003, 0.006, 1.0]) // near-black space (Starfield/Star Citizen/HD2)
+                Some([0.0, 0.0, 0.0, 1.0]) // Pitch black space skybox (Starship Troopers aesthetic)
             } else {
                 None
             },
