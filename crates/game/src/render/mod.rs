@@ -865,8 +865,10 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 1: Terrain (only when on/near a planet)
-        if state.current_planet_idx.is_some() {
+        // Pass 1: Terrain (only when playing or dropping on a planet — never in ship or menu)
+        if state.current_planet_idx.is_some()
+            && (state.phase == GamePhase::Playing || state.phase == GamePhase::DropSequence)
+        {
             let terrain_sun_intensity = sun_dir.y.max(0.0).powf(0.3) * (1.0 - cloud_density * 0.4);
             let primary_biome = state.planet.primary_biome;
             let deform_enabled = matches!(

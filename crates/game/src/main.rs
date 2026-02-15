@@ -1247,6 +1247,8 @@ struct ChunkManager {
     frequency: f64,
     /// Multi-biome sampler for per-vertex biome colors and height variation.
     planet_biomes: PlanetBiomes,
+    /// Chunks that need mesh+collider rebuild; drained each frame (throttled) to avoid artillery lag.
+    pending_chunk_rebuilds: Vec<(i32, i32)>,
 }
 
 impl ChunkManager {
@@ -1260,11 +1262,13 @@ impl ChunkManager {
             height_scale,
             frequency,
             planet_biomes,
+            pending_chunk_rebuilds: Vec::new(),
         }
     }
 
     /// Remove all chunks and their physics colliders.
     fn clear_all(&mut self, physics: &mut PhysicsWorld) {
+        self.pending_chunk_rebuilds.clear();
         for (_, chunk) in self.chunks.drain() {
             physics.remove_collider(chunk.collider_handle);
         }
@@ -1515,12 +1519,13 @@ impl ChunkManager {
 
     /// Simulate terrain collapse (sand/gravel physics): steep slopes slump to angle of repose.
     /// Run after deformation so excavated terrain falls realistically.
+    /// Returns chunk keys that need mesh+collider rebuild (caller adds to pending and processes throttled).
     fn simulate_terrain_collapse(
         &mut self,
         chunk_keys: &[(i32, i32)],
-        device: &wgpu::Device,
-        physics: &mut PhysicsWorld,
-    ) {
+        _device: &wgpu::Device,
+        _physics: &mut PhysicsWorld,
+    ) -> Vec<(i32, i32)> {
         const ANGLE_OF_REPOSE_DEG: f32 = 38.0;
         const ITERATIONS: usize = 5; // Reduced from 8 — most settling happens in first few
 
@@ -1545,7 +1550,7 @@ impl ChunkManager {
         }
         let all_keys: Vec<(i32, i32)> = key_set.into_iter().collect();
         if all_keys.is_empty() {
-            return;
+            return chunk_keys.to_vec();
         }
 
         // Reuse buffers across iterations to avoid alloc
@@ -1665,9 +1670,70 @@ impl ChunkManager {
             }
         }
 
-        for &key in &chunks_modified {
-            self.rebuild_chunk_mesh_and_collider(key, device, physics);
+        chunks_modified.into_iter().collect()
+    }
+
+    /// Sync height at shared edges between modified chunks and their loaded neighbors to remove seams.
+    /// Returns all chunk keys that need a mesh+collider rebuild (modified + neighbors we touched).
+    fn sync_chunk_edge_heights(&mut self, modified_keys: &[(i32, i32)]) -> Vec<(i32, i32)> {
+        let res = self.chunk_resolution as usize;
+        // (neighbor_key, vertex_index, new_height)
+        let mut updates: Vec<((i32, i32), usize, f32)> = Vec::new();
+        for &(cx, cz) in modified_keys {
+            let chunk = match self.chunks.get(&(cx, cz)) {
+                Some(c) => c,
+                None => continue,
+            };
+            let heights = &chunk.terrain.heightmap;
+            // Left edge (x=0) -> neighbor (cx-1, cz) right edge (x=res-1)
+            if let Some(_) = self.chunks.get(&(cx - 1, cz)) {
+                for z in 0..res {
+                    let idx = z * res;
+                    updates.push(((cx - 1, cz), z * res + (res - 1), heights[idx]));
+                }
+            }
+            // Right edge (x=res-1) -> neighbor (cx+1, cz) left edge (x=0)
+            if let Some(_) = self.chunks.get(&(cx + 1, cz)) {
+                for z in 0..res {
+                    let idx = z * res + (res - 1);
+                    updates.push(((cx + 1, cz), z * res, heights[idx]));
+                }
+            }
+            // Bottom edge (z=0) -> neighbor (cx, cz-1) top edge (z=res-1)
+            if let Some(_) = self.chunks.get(&(cx, cz - 1)) {
+                for x in 0..res {
+                    let idx = x;
+                    updates.push(((cx, cz - 1), (res - 1) * res + x, heights[idx]));
+                }
+            }
+            // Top edge (z=res-1) -> neighbor (cx, cz+1) bottom edge (z=0)
+            if let Some(_) = self.chunks.get(&(cx, cz + 1)) {
+                for x in 0..res {
+                    let idx = (res - 1) * res + x;
+                    updates.push(((cx, cz + 1), x, heights[idx]));
+                }
+            }
         }
+        let mut neighbor_keys = std::collections::HashSet::new();
+        for (nkey, idx, h) in updates {
+            if let Some(chunk) = self.chunks.get_mut(&nkey) {
+                chunk.terrain.heightmap[idx] = h;
+                chunk.terrain.vertices[idx].position[1] = h;
+                neighbor_keys.insert(nkey);
+            }
+        }
+        for nkey in &neighbor_keys {
+            if let Some(chunk) = self.chunks.get_mut(nkey) {
+                chunk.terrain.recalculate_normals();
+            }
+        }
+        let mut out: Vec<(i32, i32)> = modified_keys.to_vec();
+        for k in neighbor_keys {
+            if !out.contains(&k) {
+                out.push(k);
+            }
+        }
+        out
     }
 
     /// Rebuild mesh, water mesh, and collider for a chunk after terrain modification.
@@ -1747,7 +1813,24 @@ impl ChunkManager {
         }
         // Terrain physics: steep slopes collapse (sand/gravel angle of repose)
         if !affected_keys.is_empty() {
-            self.simulate_terrain_collapse(&affected_keys, device, physics);
+            let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
+            let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
+            self.pending_chunk_rebuilds.extend(to_rebuild);
+        }
+    }
+
+    /// Process up to `max_per_frame` pending chunk mesh+collider rebuilds (reduces artillery lag).
+    fn process_pending_rebuilds(
+        &mut self,
+        device: &wgpu::Device,
+        physics: &mut PhysicsWorld,
+        max_per_frame: usize,
+    ) {
+        let n = self.pending_chunk_rebuilds.len().min(max_per_frame);
+        for _ in 0..n {
+            if let Some(key) = self.pending_chunk_rebuilds.pop() {
+                self.rebuild_chunk_mesh_and_collider(key, device, physics);
+            }
         }
     }
 
@@ -1776,7 +1859,9 @@ impl ChunkManager {
             }
         }
         if !affected_keys.is_empty() {
-            self.simulate_terrain_collapse(&affected_keys, device, physics);
+            let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
+            let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
+            self.pending_chunk_rebuilds.extend(to_rebuild);
         }
     }
 
@@ -2196,6 +2281,7 @@ impl GameState {
     }
 
     /// Transition to main menu (from pause or ship). Resets cursor and menu state.
+    /// Clears terrain and world so returning to Play doesn't show stale planet content in the ship.
     fn transition_to_main_menu(&mut self) {
         self.phase = GamePhase::MainMenu;
         self.main_menu_selected = 0;
@@ -2210,6 +2296,25 @@ impl GameState {
         self.renderer.window.set_cursor_visible(true);
         let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::None);
         self.input.set_cursor_locked(false);
+
+        // Clear terrain and world so "Play" -> ship doesn't show previous mission's terrain/corpses
+        self.chunk_manager.clear_all(&mut self.physics);
+        let all_entities: Vec<hecs::Entity> = self.world.iter().map(|e| e.entity()).collect();
+        for entity in all_entities {
+            let _ = self.world.despawn(entity);
+        }
+        self.effects = EffectsManager::new();
+        self.rain_drops.clear();
+        self.artillery_shells.clear();
+        self.artillery_muzzle_flashes.clear();
+        self.artillery_trail_particles.clear();
+        self.grounded_artillery_shells.clear();
+        self.grounded_shell_casings.clear();
+        self.artillery_barrage = None;
+        self.extraction_squadmates_aboard.clear();
+        self.last_player_track_pos = None;
+        self.ground_track_bug_timer = 0.0;
+        self.squad_track_last.clear();
     }
 
     /// Update while aboard the Federation destroyer.
@@ -4104,6 +4209,10 @@ impl GameState {
 
     /// Enter the ship interior phase for a given planet (pre-drop staging).
     fn begin_ship_phase(&mut self, planet_idx: usize) {
+        // If we were still on a planet (e.g. quit to menu then Play without having cleared), clear now
+        if self.current_planet_idx.is_some() {
+            self.leave_planet();
+        }
         let body = &self.current_system.bodies[planet_idx];
         let planet = &body.planet;
 

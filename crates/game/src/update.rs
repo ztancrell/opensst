@@ -93,6 +93,13 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
     let cam_pos = state.camera.position();
     if state.current_planet_idx.is_some() {
         state.chunk_manager.update(cam_pos, state.renderer.device(), &mut state.physics);
+        // Throttle terrain mesh+collider rebuilds (e.g. after artillery) to avoid freezes
+        const MAX_CHUNK_REBUILDS_PER_FRAME: usize = 4;
+        state.chunk_manager.process_pending_rebuilds(
+            state.renderer.device(),
+            &mut state.physics,
+            MAX_CHUNK_REBUILDS_PER_FRAME,
+        );
     }
 
     // Update flow field target to player position (for AI)
