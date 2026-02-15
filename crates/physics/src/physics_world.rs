@@ -1,7 +1,15 @@
 //! Physics world management with Rapier3D.
 
+use crate::collision::CollisionGroup;
 use engine_core::{Transform, Vec3};
+use rapier3d::na::{Isometry3, Vector3};
 use rapier3d::prelude::*;
+
+/// Environment collision groups so static geometry (terrain, roads, buildings) collides with player/enemies.
+fn env_collision_groups() -> InteractionGroups {
+    let (membership, filter) = CollisionGroup::environment();
+    InteractionGroups::new(membership, filter)
+}
 
 /// Main physics world containing all simulation state.
 pub struct PhysicsWorld {
@@ -126,7 +134,32 @@ impl PhysicsWorld {
 
     /// Add a ground plane collider (flat Y=0 half-space).
     pub fn add_ground_plane(&mut self) -> ColliderHandle {
-        let collider = ColliderBuilder::halfspace(Vector::y_axis()).build();
+        let collider = ColliderBuilder::halfspace(Vector::y_axis())
+            .collision_groups(env_collision_groups())
+            .build();
+        self.collider_set.insert(collider)
+    }
+
+    /// Add a static cuboid collider (e.g. road segments). No parent body; collider is fixed in world.
+    /// `translation`: world position of center. `rotation_y_rad`: rotation around Y axis in radians.
+    /// `half_extents`: half sizes in local X, Y, Z (after rotation).
+    pub fn add_static_cuboid(
+        &mut self,
+        translation: Vec3,
+        rotation_y_rad: f32,
+        half_extents: Vec3,
+    ) -> ColliderHandle {
+        let tra = vector![translation.x, translation.y, translation.z];
+        let axisangle = Vector3::y_axis().into_inner() * (rotation_y_rad as Real);
+        let position = Isometry3::new(tra, axisangle);
+        let collider = ColliderBuilder::cuboid(
+            half_extents.x as Real,
+            half_extents.y as Real,
+            half_extents.z as Real,
+        )
+        .position(position)
+        .collision_groups(env_collision_groups())
+        .build();
         self.collider_set.insert(collider)
     }
 
@@ -157,7 +190,9 @@ impl PhysicsWorld {
         let heights_matrix = DMatrix::from_fn(nrows, ncols, |i, j| heights[i * ncols + j] as Real);
         let scale = vector![size_x, 1.0, size_z];
 
-        let collider = ColliderBuilder::heightfield(heights_matrix, scale).build();
+        let collider = ColliderBuilder::heightfield(heights_matrix, scale)
+            .collision_groups(env_collision_groups())
+            .build();
         self.collider_set.insert(collider)
     }
 
@@ -198,6 +233,7 @@ impl PhysicsWorld {
 
         let collider = ColliderBuilder::heightfield(heights_matrix, scale)
             .translation(vector![offset_x, 0.0, offset_z])
+            .collision_groups(env_collision_groups())
             .build();
         self.collider_set.insert(collider)
     }

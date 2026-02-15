@@ -247,6 +247,19 @@ pub struct PlanetBiomes {
 }
 
 impl PlanetBiomes {
+    /// Earth homeworld: all biomes for maximum variety (desert, frozen, jungle, volcanic, etc.).
+    /// Deterministic from seed for replayability.
+    pub fn earth(seed: u64) -> Self {
+        let biome_noise = Perlin::new(deterministic_noise_seed(seed, 0));
+        let blend_noise = Simplex::new(deterministic_noise_seed(seed, 1));
+        Self {
+            biomes: ALL_BIOMES.to_vec(),
+            biome_noise,
+            _blend_noise: blend_noise,
+            region_scale: 0.003, // Slightly larger regions so all 12 biomes are visible
+        }
+    }
+
     /// Create a multi-biome planet from a seed.
     /// Picks 2-4 distinct biome types and builds noise for spatial selection.
     pub fn from_seed(seed: u64) -> Self {

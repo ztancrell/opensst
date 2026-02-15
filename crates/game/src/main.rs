@@ -29,6 +29,9 @@ mod smoke;
 mod spawner;
 mod squad;
 mod artillery;
+mod citizen;
+mod dialogue;
+mod earth_territory;
 mod tac_fighter;
 mod viewmodel;
 mod weapons;
@@ -76,7 +79,9 @@ use horde_ai::HordeAI;
 use hud::HUDSystem;
 use smoke::{SmokeCloud, SmokeGrenade, SmokeParticle};
 use spawner::BugSpawner;
+use citizen::{despawn_citizens, spawn_earth_citizens, update_citizens, Citizen};
 use squad::{despawn_squad, spawn_squad, update_squad_combat, update_squad_movement, SquadMate, SquadMateKind};
+use dialogue::DialogueState;
 use artillery::{ArtilleryBarrage, ArtilleryMuzzleFlash, ArtilleryShell, ArtilleryTrailParticle, GroundedArtilleryShell};
 use tac_fighter::{TacBomb, TacFighter, TacFighterPhase};
 use viewmodel::{GroundedShellCasing, ShellCasing, ShellCasingType, ViewmodelAnimState};
@@ -154,6 +159,18 @@ pub struct GameState {
     approach_flight_state: Option<ApproachFlightState>,
     // Galactic War Table
     war_state: GalacticWarState,
+
+    // Earth settlement (citizens + dialogue) — only when planet.name == "Earth"
+    settlement_center: Option<Vec3>,
+    /// Global waypoints for territory (cities, towns, farms). Set when landing on Earth.
+    earth_waypoints: Option<Vec<(f32, f32)>>,
+    /// Roads and walking paths mesh (drawn when on Earth). Built at landing.
+    earth_roads_mesh: Option<Mesh>,
+    /// Road segment colliders (removed when leaving Earth).
+    earth_road_colliders: Vec<ColliderHandle>,
+    /// Building cuboid colliders on Earth (removed when leaving Earth).
+    earth_building_colliders: Vec<ColliderHandle>,
+    dialogue_state: DialogueState,
 
     // Sky and weather (dynamic)
     time_of_day: f32,       // 0 = dawn, 0.25 = noon, 0.5 = dusk, 0.75 = night
@@ -1209,6 +1226,8 @@ struct EnvironmentMeshes {
     crystal: Mesh,
     /// Generic prop sphere (for varied decorations)
     prop_sphere: Mesh,
+    /// Beveled unit cube (UCF buildings — chamfered edges)
+    beveled_cube: Mesh,
 }
 
 impl EnvironmentMeshes {
@@ -1225,8 +1244,10 @@ impl EnvironmentMeshes {
         let rock_chunk = Mesh::from_data(device, &v, &idx);
         let (v, idx) = authored_env_meshes::build_rock_boulder();
         let rock_boulder = Mesh::from_data(device, &v, &idx);
+        // Solid unit cube: corners connect (used for Earth buildings, UCF landmarks, etc.)
+        let cube = Mesh::cube(device);
         let (v, idx) = authored_env_meshes::build_beveled_cube();
-        let cube = Mesh::from_data(device, &v, &idx);
+        let beveled_cube = Mesh::from_data(device, &v, &idx);
 
         Self {
             ground: Mesh::plane(device, 200.0),
@@ -1240,6 +1261,7 @@ impl EnvironmentMeshes {
             egg_cluster,
             crystal: Mesh::sphere(device, 1.0, 6, 4),       // Crystal spike (stretched via transform)
             prop_sphere: Mesh::sphere(device, 1.0, 8, 6),   // Generic decoration
+            beveled_cube,
         }
     }
 }
@@ -1265,12 +1287,20 @@ struct ChunkManager {
     frequency: f64,
     /// Multi-biome sampler for per-vertex biome colors and height variation.
     planet_biomes: PlanetBiomes,
+    /// If true, terrain is smooth (no voxel quantization) and gentler — e.g. terraformed Earth.
+    use_smooth_terrain: bool,
     /// Chunks that need mesh+collider rebuild; drained each frame (throttled) to avoid artillery lag.
     pending_chunk_rebuilds: Vec<(i32, i32)>,
 }
 
 impl ChunkManager {
-    fn new(planet_seed: u64, height_scale: f32, frequency: f64, planet_biomes: PlanetBiomes) -> Self {
+    fn new(
+        planet_seed: u64,
+        height_scale: f32,
+        frequency: f64,
+        planet_biomes: PlanetBiomes,
+        use_smooth_terrain: bool,
+    ) -> Self {
         Self {
             chunks: HashMap::new(),
             chunk_size: 64.0,
@@ -1280,6 +1310,7 @@ impl ChunkManager {
             height_scale,
             frequency,
             planet_biomes,
+            use_smooth_terrain,
             pending_chunk_rebuilds: Vec::new(),
         }
     }
@@ -1293,12 +1324,14 @@ impl ChunkManager {
     }
 
     /// Reinitialize for a new planet (clears chunks, updates params).
+    /// When use_smooth_terrain is true (e.g. terraformed Earth), terrain is smooth and no voxel quantization.
     fn reset_for_planet(
         &mut self,
         planet_seed: u64,
         height_scale: f32,
         frequency: f64,
         planet_biomes: PlanetBiomes,
+        use_smooth_terrain: bool,
         physics: &mut PhysicsWorld,
     ) {
         self.clear_all(physics);
@@ -1306,6 +1339,7 @@ impl ChunkManager {
         self.height_scale = height_scale;
         self.frequency = frequency;
         self.planet_biomes = planet_biomes;
+        self.use_smooth_terrain = use_smooth_terrain;
     }
 
     /// Map a world-space X or Z coordinate to the chunk index that contains it.
@@ -1424,7 +1458,7 @@ impl ChunkManager {
             .biomes
             .iter()
             .any(|b| procgen::BiomeConfig::from_type(*b).has_water());
-        let config = TerrainConfig {
+        let mut config = TerrainConfig {
             size: self.chunk_size,
             resolution: self.chunk_resolution,
             height_scale: self.height_scale,
@@ -1436,6 +1470,10 @@ impl ChunkManager {
             water_coverage: if has_water { 0.45 } else { 0.0 },
             ..Default::default()
         };
+        if self.use_smooth_terrain {
+            config.voxel_size = None;
+            config.persistence = 0.4;
+        }
         let terrain = TerrainData::generate(config, Some(&self.planet_biomes));
 
         // Build GPU mesh (pass per-vertex biome color through)
@@ -1994,12 +2032,22 @@ impl GameState {
         let biome_config = planet.get_biome_config();
         let planet_biomes = planet.biome_sampler();
 
-        // Create ChunkManager for infinite terrain with multi-biome support
+        // Create ChunkManager for infinite terrain. Earth: terraformed (gentler, smooth).
+        let (init_height, init_freq, init_smooth) = if planet.name == "Earth" {
+            (10.0, 0.012, true)
+        } else {
+            (
+                15.0 * biome_config.height_scale,
+                0.02 * biome_config.frequency_scale as f64,
+                false,
+            )
+        };
         let mut chunk_manager = ChunkManager::new(
             planet.seed,
-            15.0 * biome_config.height_scale,
-            0.02 * biome_config.frequency_scale as f64,
+            init_height,
+            init_freq,
             planet_biomes,
+            init_smooth,
         );
         // Pre-load chunks around the origin so the player has terrain at spawn
         chunk_manager.update(Vec3::ZERO, renderer.device(), &mut physics);
@@ -2074,6 +2122,12 @@ impl GameState {
             approach_timer: 0.0,
             approach_flight_state: None,
             war_state: war_state_initial,
+            settlement_center: None,
+            earth_waypoints: None,
+            earth_roads_mesh: None,
+            earth_road_colliders: Vec::new(),
+            earth_building_colliders: Vec::new(),
+            dialogue_state: DialogueState::default(),
             time_of_day: 0.25,  // start at noon
             weather: Weather::new(),
             rain_drops: Vec::new(),
@@ -2278,7 +2332,8 @@ impl GameState {
                 let biome_names: Vec<String> = self.chunk_manager.planet_biomes.biomes.iter().map(|b| format!("{:?}", b)).collect();
                 self.game_messages.info(format!("FEDERATION DESTROYER \"ROGER YOUNG\" - {} SYSTEM", self.current_system.name));
                 self.game_messages.info(format!("Star: {} ({:?}) | {} planets", self.current_system.star.name, self.current_system.star.star_type, self.current_system.bodies.len()));
-                self.game_messages.info(format!("TARGET: {} | Biomes: {} | Danger: {}", self.planet.name, biome_names.join(", "), self.planet.danger_level));
+                let danger_str = if self.planet.name == "Earth" { "—".to_string() } else { self.planet.danger_level.to_string() };
+                self.game_messages.info(format!("TARGET: {} | Biomes: {} | Danger: {}", self.planet.name, biome_names.join(", "), danger_str));
                 self.game_messages.warning("Press [SPACE] to deploy drop pod!");
             } else {
                 // Quit
@@ -2534,12 +2589,18 @@ impl GameState {
         if self.input.is_key_pressed(KeyCode::Space) && dist_to_bay < 4.0 {
             if let Some(ship) = self.ship_state.take() {
                 let planet_idx = ship.target_planet_idx;
+                let planet = &self.current_system.bodies[planet_idx].planet;
                 if let Some(status) = self.war_state.planets.get_mut(planet_idx) {
                     status.active_operation = true;
                 }
-                self.deploy_planet_idx = Some(planet_idx);
-                self.approach_flight_state = None;
-                self.transition_approach_to_drop();
+                if planet.name == "Earth" {
+                    // Roger Young stays in orbit; dropship takes MI trooper to Earth for resupply & visit
+                    self.transition_to_earth_visit(planet_idx);
+                } else {
+                    self.deploy_planet_idx = Some(planet_idx);
+                    self.approach_flight_state = None;
+                    self.transition_approach_to_drop();
+                }
             }
         }
 
@@ -2591,12 +2652,78 @@ impl GameState {
         self.game_messages.update(dt);
     }
 
+    /// Deploy to Earth via dropship (no drop pod). Roger Young stays in orbit; trooper visits for resupply & R&R.
+    fn transition_to_earth_visit(&mut self, planet_idx: usize) {
+        self.prepare_planet_for_drop(planet_idx);
+        self.mission = fps::MissionState::new_earth_visit();
+        self.ambient_dust.particles.clear();
+        self.biome_atmosphere.particles.clear();
+        self.rain_drops.clear();
+        self.complete_earth_visit();
+    }
+
+    /// Land on Earth (dropship pad at city center). No crater, no squad pods — bustling Federation world.
+    fn complete_earth_visit(&mut self) {
+        let landing = Vec3::ZERO; // Dropship pad / city center
+        let spawn_y = self.chunk_manager.walkable_height(landing.x, landing.z) + 1.8;
+        let spawn_pos = Vec3::new(landing.x, spawn_y, landing.z);
+
+        self.camera.transform.position = spawn_pos;
+        self.camera.transform.rotation = Quat::IDENTITY;
+        self.player.position = spawn_pos;
+        self.squad_drop_pods = None; // No squad on resupply run
+
+        self.settlement_center = Some(landing);
+        self.earth_waypoints = Some(earth_territory::all_waypoints_global());
+        earth_territory::spawn_territory_citizens(
+            &mut self.world,
+            |x, z| self.chunk_manager.sample_height(x, z),
+        );
+        earth_territory::spawn_earth_buildings(
+            &mut self.world,
+            |x, z| self.chunk_manager.sample_height(x, z),
+        );
+        let (road_verts, road_idx) = earth_territory::build_earth_roads_mesh(|x, z| self.chunk_manager.sample_height(x, z));
+        self.earth_roads_mesh = Some(Mesh::from_data(
+            self.renderer.device(),
+            &road_verts,
+            &road_idx,
+        ));
+        for (cx, cz, half_len, half_w, rotation_y_rad) in earth_territory::road_collider_segments() {
+            let terrain_y = self.chunk_manager.sample_height(cx, cz);
+            let cy = terrain_y - 0.05;
+            let center = Vec3::new(cx, cy, cz);
+            let half_extents = Vec3::new(half_len, 0.05, half_w);
+            let handle = self.physics.add_static_cuboid(center, rotation_y_rad, half_extents);
+            self.earth_road_colliders.push(handle);
+        }
+        for &(bx, bz, sx, sy, sz) in earth_territory::earth_building_boxes() {
+            let terrain_y = self.chunk_manager.sample_height(bx, bz);
+            let cy = terrain_y + sy * 0.5;
+            let center = Vec3::new(bx, cy, bz);
+            let half_extents = Vec3::new(sx * 0.5, sy * 0.5, sz * 0.5);
+            let handle = self.physics.add_static_cuboid(center, 0.0, half_extents);
+            self.earth_building_colliders.push(handle);
+        }
+
+        self.game_messages.success("DROPSHIP TOUCHED DOWN. Welcome home, trooper.".to_string());
+        self.game_messages.info("Roger Young remains in Earth orbit. UCF safe zone — no bugs on the homeworld.".to_string());
+        self.game_messages.info("Resupply and visit. Cities, towns, farms — this is what we're fighting for. [V] when ready to return.".to_string());
+        self.game_messages.info("WASD = move | Shift = sprint | E = talk to citizens | M = galaxy map | V = return to ship".to_string());
+
+        self.phase = GamePhase::Playing;
+    }
+
     /// Transition from approach phase directly to drop sequence (EVA removed).
     fn transition_approach_to_drop(&mut self) {
         let planet_idx = self.deploy_planet_idx.unwrap_or(0);
         self.deploy_planet_idx = None;
 
+        let planet = &self.current_system.bodies[planet_idx].planet;
         self.game_messages.warning("DROP POD LAUNCHED! BRACE FOR IMPACT!".to_string());
+        if planet.name == "Earth" {
+            self.game_messages.info("Entering Earth's atmosphere — homeworld. Smooth transition: space → orbit → atmosphere → surface.".to_string());
+        }
         self.game_messages.info("\"Come on you apes, you wanna live forever?!\"".to_string());
 
         self.prepare_planet_for_drop(planet_idx);
@@ -2696,12 +2823,22 @@ impl GameState {
 
         self.current_planet_idx = Some(planet_idx);
 
-        // Reset terrain for this planet
+        // Reset terrain for this planet. Earth: terraformed — gentler hills, smooth (no voxel) terrain.
+        let (height_scale, frequency, use_smooth_terrain) = if planet.name == "Earth" {
+            (10.0, 0.012, true)
+        } else {
+            (
+                15.0 * biome_config.height_scale,
+                0.02 * biome_config.frequency_scale as f64,
+                false,
+            )
+        };
         self.chunk_manager.reset_for_planet(
             planet.seed,
-            15.0 * biome_config.height_scale,
-            0.02 * biome_config.frequency_scale as f64,
+            height_scale,
+            frequency,
             planet_biomes,
+            use_smooth_terrain,
             &mut self.physics,
         );
 
@@ -2812,6 +2949,27 @@ impl GameState {
                 self.game_messages.info("UCF Firebase — the bug horde is coming. Hold the perimeter!".to_string());
             } else {
                 self.game_messages.success("DROP POD DOWN! Move out, trooper!".to_string());
+                if self.planet.name == "Earth" {
+                    self.game_messages.info("Surface: Earth. Defend the homeworld — Starship Troopers style.".to_string());
+                    self.settlement_center = Some(landing);
+                    spawn_earth_citizens(
+                        &mut self.world,
+                        landing,
+                        |x, z| self.chunk_manager.sample_height(x, z),
+                        14,
+                    );
+                    self.game_messages.info("Settlement nearby — citizens on schedule. Press [E] near a citizen to talk.".to_string());
+                } else {
+                    self.settlement_center = None;
+                    self.earth_waypoints = None;
+                    self.earth_roads_mesh = None;
+                    for h in self.earth_road_colliders.drain(..) {
+                        self.physics.remove_collider(h);
+                    }
+                    for h in self.earth_building_colliders.drain(..) {
+                        self.physics.remove_collider(h);
+                    }
+                }
                 self.game_messages.info("Look up — squad drop pods inbound from the Roger Young in orbit!".to_string());
                 self.game_messages.info(format!("IMPACT SITE: crater radius 16m | {:.0}m deep", 6.0));
             }
@@ -2827,6 +2985,10 @@ impl GameState {
     }
 
     fn spawn_physics_bugs(&mut self, dt: f32) {
+        // Earth is a UCF safe zone — no bugs on the homeworld.
+        if self.planet.name == "Earth" {
+            return;
+        }
         // Continuous horde spawning — no waves, no pauses, just bugs.
         let spawn_positions: Vec<((BugType, Option<bug::BugVariant>), Vec3)> = {
             let mut positions = Vec::new();
@@ -2913,6 +3075,10 @@ impl GameState {
     fn update_bug_holes(&mut self, dt: f32) {
         // Only process when on a planet
         if self.current_planet_idx.is_none() {
+            return;
+        }
+        // Earth is a UCF safe zone — no bug holes on the homeworld.
+        if self.planet.name == "Earth" {
             return;
         }
 
@@ -3504,6 +3670,13 @@ impl GameState {
         // Apply velocity to position
         let mut new_pos = self.camera.transform.position + self.player_velocity * dt;
 
+        // On Earth: push out of building footprints so player cannot walk through UCF buildings
+        if self.planet.name == "Earth" {
+            let (px, pz) = earth_territory::push_out_of_building_footprints(new_pos.x, new_pos.z);
+            new_pos.x = px;
+            new_pos.z = pz;
+        }
+
         // Terrain collision: sample ground height at new position
         let terrain_y = self.chunk_manager.sample_height(new_pos.x, new_pos.z);
         let is_in_water = self.chunk_manager.is_in_water(new_pos.x, new_pos.z);
@@ -3533,6 +3706,16 @@ impl GameState {
         } else {
             terrain_y
         };
+        // On Earth: roads and paths are solid — use road surface as ground when standing on one
+        if !is_in_water && self.planet.name == "Earth" {
+            if let Some(road_y) = earth_territory::road_ground_y_at(
+                new_pos.x,
+                new_pos.z,
+                |a, b| self.chunk_manager.sample_height(a, b),
+            ) {
+                ground_y = ground_y.max(road_y);
+            }
+        }
         if !is_in_water {
             let player_xz = Vec3::new(new_pos.x, 0.0, new_pos.z);
             for (_, (corpse_transform, _corpse)) in self.world.query::<(&Transform, &BugCorpse)>().iter() {
@@ -4235,6 +4418,16 @@ impl GameState {
 
             self.current_planet_idx = None;
             self.defense_base = None;
+            self.settlement_center = None;
+            self.earth_waypoints = None;
+            self.earth_roads_mesh = None;
+            for h in self.earth_road_colliders.drain(..) {
+                self.physics.remove_collider(h);
+            }
+            for h in self.earth_building_colliders.drain(..) {
+                self.physics.remove_collider(h);
+            }
+            self.dialogue_state = DialogueState::Closed;
 
             // Clear terrain chunks (we're in space now)
             self.chunk_manager.clear_all(&mut self.physics);
@@ -4299,6 +4492,9 @@ impl GameState {
         let planet = &body.planet;
 
         self.game_messages.info(format!("ROGER YOUNG — {} System", self.current_system.name));
+        if planet.name == "Earth" {
+            self.game_messages.success("Orbiting Earth — homeworld. This is what we're fighting for.".to_string());
+        }
         self.game_messages.info(format!("Approach the WAR TABLE [E] — change system with ↑/↓ or W/Q, then pick a planet."));
         self.game_messages.info(format!("At war table: 1=Extermination 2=Bug Hunt 3=Hold the Line 4=Defense 5=Hive Destruction. Drop bay is aft."));
 
@@ -4394,11 +4590,16 @@ impl GameState {
         }
         save_galactic_war(self.universe_seed, self.current_system_idx, &self.war_state);
 
-        self.game_messages.success(format!(
-            "EXTRACTION COMPLETE | Kills: {} | Survived: {} | Peak bugs: {} | Threat: {}",
-            kills, time, peak, threat,
-        ));
-        self.game_messages.info("\"I'm from Buenos Aires, and I say kill 'em all!\"".to_string());
+        if self.planet.name == "Earth" {
+            self.game_messages.success("Dropship returning to Roger Young. Good visit, trooper.".to_string());
+            self.game_messages.info("Remember what we're fighting for. The Federation thanks you.".to_string());
+        } else {
+            self.game_messages.success(format!(
+                "EXTRACTION COMPLETE | Kills: {} | Survived: {} | Peak bugs: {} | Threat: {}",
+                kills, time, peak, threat,
+            ));
+            self.game_messages.info("\"I'm from Buenos Aires, and I say kill 'em all!\"".to_string());
+        }
 
         // Clean up the planet (despawn entities, clear terrain)
         self.leave_planet();
@@ -4605,8 +4806,11 @@ impl GameState {
             _ => [0.3, 0.5, 0.2, 1.0],
         };
 
-        // ---- Bug holes (count varies by biome) ----
-        let bug_hole_count = if has_hive {
+        // ---- Bug holes (count varies by biome) — Earth is UCF safe zone, no holes ----
+        let is_earth = planet.name == "Earth";
+        let bug_hole_count = if is_earth {
+            0
+        } else if has_hive {
             rng.gen_range(35..60)
         } else {
             match primary {
@@ -4640,8 +4844,8 @@ impl GameState {
             self.world.spawn((t, Destructible::new(200.0 + scale * 50.0, 6, 0.4), BugHole::new(spawn_interval, max_bugs), cached));
         }
 
-        // ---- Hive structures (only on HiveWorlds, lots of them) ----
-        if has_hive {
+        // ---- Hive structures (only on HiveWorlds, never on Earth) ----
+        if has_hive && !is_earth {
             let hive_count = rng.gen_range(20..40);
             for _ in 0..hive_count {
                 let x = (rng.gen::<f32>() - 0.5) * scatter_range;
@@ -5289,11 +5493,39 @@ impl GameState {
                 .unwrap_or(0)
                 .min(self.current_system.bodies.len().saturating_sub(1));
             let star = &self.current_system.star;
-            let ot = self.orbital_time as f32;
-            let n = self.current_system.bodies.len().max(1);
+            let ot = self.orbital_time;
 
-            // Star: above and behind the viewscreen (lights the scene, clearly visible)
-            let star_pos = Vec3::new(0.0, 28.0, 150.0);
+            // Realistic placement: use actual orbital positions, then orient so the Roger Young
+            // has the targeted planet in front of the viewscreen (ship "points" at the target).
+            let target_pos = self.current_system.bodies[target_idx].orbital_position(ot);
+            let ship_pos = target_pos * 0.25; // Ship between star and target (so target is ahead)
+            let target_rel = target_pos - ship_pos;
+            let dist_target = target_rel.length();
+            if dist_target < 1e-6 {
+                // Fallback: target at origin (shouldn't happen)
+                let star_pos = Vec3::new(0.0, 28.0, 150.0);
+                let star_radius = (star.radius * 0.015).max(3.0).min(8.0);
+                instances.push(CelestialBodyInstance {
+                    position: star_pos.into(),
+                    radius: star_radius,
+                    color: [star.color.x, star.color.y, star.color.z, 1.0],
+                    star_direction: [0.0, 0.0, 0.0, 0.0],
+                    atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                });
+                return instances;
+            }
+
+            let scale = 70.0f32 / dist_target as f32; // Target will sit 70 units in front of the window
+            let target_rel_f = Vec3::new(target_rel.x as f32, target_rel.y as f32, target_rel.z as f32);
+            let forward = target_rel_f.normalize();
+            // Rotation so "forward" (target direction) becomes +Z (viewscreen direction)
+            let rot = Quat::from_rotation_arc(forward, Vec3::Z);
+
+            // Star: behind the ship in system space; after rotation it's behind (-Z). Place in sky (above horizon).
+            let star_rel = -ship_pos;
+            let star_rel_f = Vec3::new(star_rel.x as f32, star_rel.y as f32, star_rel.z as f32) * scale;
+            let star_view = rot * star_rel_f;
+            let star_pos: Vec3 = star_view + Vec3::new(0.0, 28.0, 0.0); // Lift into sky so it's visible
             let star_radius = (star.radius * 0.015).max(3.0).min(8.0);
             instances.push(CelestialBodyInstance {
                 position: star_pos.into(),
@@ -5303,54 +5535,149 @@ impl GameState {
                 atmosphere_color: [0.0, 0.0, 0.0, 0.0],
             });
 
-            // Target planet: prominent through the forward window (the one you chose at the war table)
-            let body = &self.current_system.bodies[target_idx];
-            let planet_scale = 0.04;
-            let target_planet_pos = Vec3::new(0.0, 1.5, 68.0);
-            let target_radius = (body.planet.visual_radius() * planet_scale).max(6.0).min(20.0);
-            let body_to_star = (star_pos - target_planet_pos).normalize();
-            let biome_cfg = body.planet.get_biome_config();
-            let planet_color = biome_cfg.base_color;
-            instances.push(CelestialBodyInstance {
-                position: target_planet_pos.into(),
-                radius: target_radius,
-                color: [planet_color.x, planet_color.y, planet_color.z, 0.3],
-                star_direction: [body_to_star.x, body_to_star.y, body_to_star.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
-                atmosphere_color: [
-                    body.planet.atmosphere_color.x,
-                    body.planet.atmosphere_color.y,
-                    body.planet.atmosphere_color.z,
-                    if body.ring_system { 1.0 } else { 0.0 },
-                ],
-            });
+            let planet_scale = 0.04f32;
+            let mut earth_view_pos: Option<Vec3> = None;
 
-            // Other planets: in an arc beside/around the view (visible through the windows), gentle drift
+            // All planets: realistic orbital positions, rotated so target is in front
             for (i, body) in self.current_system.bodies.iter().enumerate() {
-                if i == target_idx {
-                    continue;
+                let body_pos = body.orbital_position(ot);
+                let rel = body_pos - ship_pos;
+                let rel_f = Vec3::new(rel.x as f32, rel.y as f32, rel.z as f32) * scale;
+                let view_pos = rot * rel_f;
+                // Slight Y lift so target isn't on the floor (centered in viewscreen)
+                let pos = view_pos + Vec3::new(0.0, 1.5, 0.0);
+
+                let is_target = i == target_idx;
+                if body.planet.name == "Earth" {
+                    earth_view_pos = Some(pos);
                 }
-                let angle = (i as f32 / n as f32) * std::f32::consts::TAU + ot * 0.12;
-                let px = angle.cos() * 32.0;
-                let pz = 72.0 + angle.sin() * 18.0;
-                let py = 2.0 + (ot * 0.5 + i as f32).sin() * 2.0;
-                let pos = Vec3::new(px, py, pz);
-                let radius = (body.planet.visual_radius() * planet_scale * 0.5).max(2.0).min(5.0);
-                let bts = (star_pos - pos).normalize();
-                let biome_cfg = body.planet.get_biome_config();
-                let color = biome_cfg.base_color;
-                instances.push(CelestialBodyInstance {
-                    position: pos.into(),
-                    radius,
-                    color: [color.x, color.y, color.z, 0.3],
-                    star_direction: [bts.x, bts.y, bts.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
-                    atmosphere_color: [
+
+                let radius = if is_target {
+                    (body.planet.visual_radius() * planet_scale).max(6.0).min(20.0)
+                } else {
+                    (body.planet.visual_radius() * planet_scale * 0.5).max(2.0).min(5.0)
+                };
+
+                let star_dir = (star_pos - pos).normalize();
+                // Earth from space: actual Earth colors (blue oceans, white clouds)
+                let (planet_color, atmo_color) = if body.planet.name == "Earth" {
+                    ([0.18, 0.42, 0.72, 0.3], [0.45, 0.65, 0.92, 1.0]) // blue planet, blue-white atmosphere
+                } else {
+                    let biome_cfg = body.planet.get_biome_config();
+                    let pc = biome_cfg.base_color;
+                    ([pc.x, pc.y, pc.z, 0.3], [
                         body.planet.atmosphere_color.x,
                         body.planet.atmosphere_color.y,
                         body.planet.atmosphere_color.z,
                         if body.ring_system { 1.0 } else { 0.0 },
-                    ],
+                    ])
+                };
+                instances.push(CelestialBodyInstance {
+                    position: pos.into(),
+                    radius,
+                    color: planet_color,
+                    star_direction: [star_dir.x, star_dir.y, star_dir.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
+                    atmosphere_color: atmo_color,
                 });
             }
+
+            // Earth orbit: bustling spaceport — stations, MI corvettes, destroyers, dropships with own flight paths
+            if let Some(earth_pos) = earth_view_pos {
+                let ot_f = ot as f32;
+                // Stations (slow orbit)
+                let stations: &[(f32, f32, f32, [f32; 4])] = &[
+                    (2.5, 0.0, 0.4, [0.55, 0.58, 0.62, 0.5]),
+                    (3.0, 1.2, 0.35, [0.5, 0.52, 0.55, 0.5]),
+                    (2.8, 2.8, 0.25, [0.6, 0.62, 0.65, 0.5]),
+                    (3.2, 4.0, 0.3, [0.48, 0.5, 0.52, 0.5]),
+                    (2.6, 5.1, 0.2, [0.58, 0.6, 0.62, 0.5]),
+                ];
+                for &(orbit_r, phase, rad, color) in stations {
+                    let angle = phase + ot_f * 0.12;
+                    let offset = Vec3::new(angle.cos() * orbit_r, (angle * 0.7).sin() * 0.3, angle.sin() * orbit_r);
+                    let pos = earth_pos + offset;
+                    let to_star = (star_pos - pos).normalize();
+                    instances.push(CelestialBodyInstance {
+                        position: pos.into(),
+                        radius: rad,
+                        color,
+                        star_direction: [to_star.x, to_star.y, to_star.z, 0.0],
+                        atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                    });
+                }
+                // MI Corvettes (small, fast orbits — varied flight paths)
+                let corvette_color = [0.14, 0.16, 0.22, 0.7];
+                for &(orbit_r, phase, speed, rad) in &[
+                    (2.2, 0.3, 0.28, 0.12),
+                    (2.4, 1.8, 0.22, 0.14),
+                    (2.7, 3.1, 0.25, 0.11),
+                    (2.3, 4.5, 0.30, 0.13),
+                    (2.9, 0.8, 0.20, 0.15),
+                    (2.5, 2.2, 0.26, 0.12),
+                    (2.6, 5.2, 0.24, 0.14),
+                    (2.8, 1.0, 0.18, 0.13),
+                    (2.4, 3.8, 0.28, 0.11),
+                    (2.7, 4.9, 0.22, 0.14),
+                ] {
+                    let angle = phase + ot_f * speed;
+                    let offset = Vec3::new(angle.cos() * orbit_r, (angle * 0.6).sin() * 0.25, angle.sin() * orbit_r);
+                    let pos = earth_pos + offset;
+                    let to_star = (star_pos - pos).normalize();
+                    instances.push(CelestialBodyInstance {
+                        position: pos.into(),
+                        radius: rad,
+                        color: corvette_color,
+                        star_direction: [to_star.x, to_star.y, to_star.z, 0.0],
+                        atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                    });
+                }
+                // MI Destroyers (large, slower orbits)
+                let destroyer_color = [0.11, 0.13, 0.18, 0.75];
+                for &(orbit_r, phase, speed, rad) in &[
+                    (3.2, 0.0, 0.10, 0.38),
+                    (3.4, 2.1, 0.08, 0.42),
+                    (3.0, 4.2, 0.11, 0.35),
+                    (3.5, 1.0, 0.09, 0.40),
+                    (3.3, 3.5, 0.07, 0.45),
+                ] {
+                    let angle = phase + ot_f * speed;
+                    let offset = Vec3::new(angle.cos() * orbit_r, (angle * 0.5).sin() * 0.35, angle.sin() * orbit_r);
+                    let pos = earth_pos + offset;
+                    let to_star = (star_pos - pos).normalize();
+                    instances.push(CelestialBodyInstance {
+                        position: pos.into(),
+                        radius: rad,
+                        color: destroyer_color,
+                        star_direction: [to_star.x, to_star.y, to_star.z, 0.0],
+                        atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                    });
+                }
+                // Dropships (medium, varied inclinations — traffic to/from surface)
+                let dropship_color = [0.18, 0.20, 0.26, 0.65];
+                for &(orbit_r, phase, speed, rad) in &[
+                    (2.35, 0.6, 0.32, 0.18),
+                    (2.55, 2.4, 0.26, 0.20),
+                    (2.45, 4.0, 0.30, 0.17),
+                    (2.65, 1.2, 0.24, 0.19),
+                    (2.5, 3.3, 0.28, 0.18),
+                    (2.4, 5.5, 0.34, 0.16),
+                    (2.7, 0.2, 0.22, 0.21),
+                    (2.6, 2.8, 0.26, 0.19),
+                ] {
+                    let angle = phase + ot_f * speed;
+                    let offset = Vec3::new(angle.cos() * orbit_r, (angle * 0.8).sin() * 0.28, angle.sin() * orbit_r);
+                    let pos = earth_pos + offset;
+                    let to_star = (star_pos - pos).normalize();
+                    instances.push(CelestialBodyInstance {
+                        position: pos.into(),
+                        radius: rad,
+                        color: dropship_color,
+                        star_direction: [to_star.x, to_star.y, to_star.z, 0.0],
+                        atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                    });
+                }
+            }
+
             return instances;
         }
 
@@ -5401,21 +5728,136 @@ impl GameState {
                 let body_to_star = (-body_pos).normalize();
                 let bts = Vec3::new(body_to_star.x as f32, body_to_star.y as f32, body_to_star.z as f32);
 
-                let biome_cfg = body.planet.get_biome_config();
-                let planet_color = biome_cfg.base_color;
-
-                instances.push(CelestialBodyInstance {
-                    position: rel_f.into(),
-                    radius: body.planet.visual_radius(),
-                    color: [planet_color.x, planet_color.y, planet_color.z, 0.3], // w < 0.5 = diffuse
-                    star_direction: [bts.x, bts.y, bts.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
-                    atmosphere_color: [
+                let (planet_color, atmo_color) = if body.planet.name == "Earth" {
+                    ([0.18, 0.42, 0.72, 0.3], [0.45, 0.65, 0.92, if body.ring_system { 1.0 } else { 0.0 }])
+                } else {
+                    let biome_cfg = body.planet.get_biome_config();
+                    let pc = biome_cfg.base_color;
+                    ([pc.x, pc.y, pc.z, 0.3], [
                         body.planet.atmosphere_color.x,
                         body.planet.atmosphere_color.y,
                         body.planet.atmosphere_color.z,
                         if body.ring_system { 1.0 } else { 0.0 },
-                    ],
+                    ])
+                };
+
+                instances.push(CelestialBodyInstance {
+                    position: rel_f.into(),
+                    radius: body.planet.visual_radius(),
+                    color: planet_color,
+                    star_direction: [bts.x, bts.y, bts.z, if body.planet.has_atmosphere { 1.0 } else { 0.0 }],
+                    atmosphere_color: atmo_color,
                 });
+
+                // Earth orbit from space: bustling spaceport — stations, MI corvettes, destroyers, dropships
+                if body.planet.name == "Earth" {
+                    let earth_center = rel_f;
+                    let ot_f = self.orbital_time as f32;
+                    // Stations (slow)
+                    for &(orbit_r, phase, speed, rad, r, g, b) in &[
+                        (800.0f32, 0.0, 0.015, 12.0, 0.55, 0.58, 0.62),
+                        (950.0, 1.2, 0.012, 10.0, 0.5, 0.52, 0.55),
+                        (880.0, 2.8, 0.018, 8.0, 0.6, 0.62, 0.65),
+                        (1020.0, 4.0, 0.014, 9.0, 0.48, 0.5, 0.52),
+                        (850.0, 5.1, 0.016, 6.0, 0.58, 0.6, 0.62),
+                    ] {
+                        let angle = phase + ot_f * speed;
+                        let offset = Vec3::new(
+                            angle.cos() * orbit_r,
+                            (angle * 0.7).sin() * 80.0,
+                            angle.sin() * orbit_r,
+                        );
+                        let pos = earth_center + offset;
+                        let to_star = (-pos).normalize();
+                        instances.push(CelestialBodyInstance {
+                            position: pos.into(),
+                            radius: rad,
+                            color: [r, g, b, 0.5],
+                            star_direction: [to_star.x, to_star.y, to_star.z, 0.0],
+                            atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                        });
+                    }
+                    // MI Corvettes (small, fast — varied flight paths)
+                    for &(orbit_r, phase, speed, rad) in &[
+                        (720.0f32, 0.3, 0.035, 5.0),
+                        (780.0, 1.8, 0.030, 6.0),
+                        (820.0, 3.1, 0.032, 5.5),
+                        (750.0, 4.5, 0.038, 5.0),
+                        (860.0, 0.8, 0.028, 6.5),
+                        (790.0, 2.2, 0.033, 5.0),
+                        (830.0, 5.2, 0.031, 5.5),
+                        (760.0, 1.0, 0.026, 6.0),
+                        (840.0, 3.8, 0.036, 5.0),
+                        (770.0, 4.9, 0.029, 6.0),
+                    ] {
+                        let angle = phase + ot_f * speed;
+                        let offset = Vec3::new(
+                            angle.cos() * orbit_r,
+                            (angle * 0.6).sin() * 60.0,
+                            angle.sin() * orbit_r,
+                        );
+                        let pos = earth_center + offset;
+                        let to_star = (-pos).normalize();
+                        instances.push(CelestialBodyInstance {
+                            position: pos.into(),
+                            radius: rad,
+                            color: [0.14, 0.16, 0.22, 0.7],
+                            star_direction: [to_star.x, to_star.y, to_star.z, 0.0],
+                            atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                        });
+                    }
+                    // MI Destroyers (large, slower)
+                    for &(orbit_r, phase, speed, rad) in &[
+                        (1050.0f32, 0.0, 0.008, 20.0),
+                        (1120.0, 2.1, 0.006, 22.0),
+                        (1000.0, 4.2, 0.009, 18.0),
+                        (1080.0, 1.0, 0.007, 21.0),
+                        (1150.0, 3.5, 0.005, 24.0),
+                    ] {
+                        let angle = phase + ot_f * speed;
+                        let offset = Vec3::new(
+                            angle.cos() * orbit_r,
+                            (angle * 0.5).sin() * 100.0,
+                            angle.sin() * orbit_r,
+                        );
+                        let pos = earth_center + offset;
+                        let to_star = (-pos).normalize();
+                        instances.push(CelestialBodyInstance {
+                            position: pos.into(),
+                            radius: rad,
+                            color: [0.11, 0.13, 0.18, 0.75],
+                            star_direction: [to_star.x, to_star.y, to_star.z, 0.0],
+                            atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                        });
+                    }
+                    // Dropships (medium — traffic to/from surface)
+                    for &(orbit_r, phase, speed, rad) in &[
+                        (740.0f32, 0.6, 0.040, 8.0),
+                        (810.0, 2.4, 0.034, 9.0),
+                        (770.0, 4.0, 0.037, 7.5),
+                        (800.0, 1.2, 0.031, 8.5),
+                        (785.0, 3.3, 0.035, 8.0),
+                        (755.0, 5.5, 0.042, 7.0),
+                        (825.0, 0.2, 0.029, 9.5),
+                        (795.0, 2.8, 0.033, 8.0),
+                    ] {
+                        let angle = phase + ot_f * speed;
+                        let offset = Vec3::new(
+                            angle.cos() * orbit_r,
+                            (angle * 0.8).sin() * 70.0,
+                            angle.sin() * orbit_r,
+                        );
+                        let pos = earth_center + offset;
+                        let to_star = (-pos).normalize();
+                        instances.push(CelestialBodyInstance {
+                            position: pos.into(),
+                            radius: rad,
+                            color: [0.18, 0.20, 0.26, 0.65],
+                            star_direction: [to_star.x, to_star.y, to_star.z, 0.0],
+                            atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                        });
+                    }
+                }
             }
 
             // Moons

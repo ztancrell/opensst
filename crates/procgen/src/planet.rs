@@ -95,6 +95,27 @@ impl PlanetSize {
 }
 
 impl Planet {
+    /// Earth — homeworld, UCF safe zone; all biomes, no bugs. Starship Troopers aesthetic.
+    pub fn earth() -> Self {
+        let seed = 0x_E4_77_00_00; // fixed seed for deterministic Earth terrain
+        Self {
+            seed,
+            name: "Earth".to_string(),
+            classification: PlanetClassification::Colony,
+            primary_biome: BiomeType::Mountain, // Neutral for UI; terrain uses all biomes via biome_sampler()
+            secondary_biome: None,
+            danger_level: 0,   // Safe zone — no danger counter on War Table
+            infestation: 0.0, // No bugs on the homeworld
+            size: PlanetSize::Large,
+            galaxy_position: Vec3::ZERO,
+            liberated: false,
+            has_atmosphere: true,
+            atmosphere_color: Vec3::new(0.92, 0.55, 0.22), // Starship Troopers orange-amber sky
+            visual_radius_value: 420.0,
+            has_skinnies: false,
+        }
+    }
+
     /// Generate a random planet from a seed.
     pub fn generate(seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
@@ -272,8 +293,13 @@ impl Planet {
     }
 
     /// Create a noise-based multi-biome sampler for this planet.
+    /// Biome sampler for terrain: Earth gets all biomes; other planets get 2–4 from seed.
     pub fn biome_sampler(&self) -> PlanetBiomes {
-        PlanetBiomes::from_seed(self.seed)
+        if self.name == "Earth" {
+            PlanetBiomes::earth(self.seed)
+        } else {
+            PlanetBiomes::from_seed(self.seed)
+        }
     }
 
     /// Calculate bug spawn rate for this planet.

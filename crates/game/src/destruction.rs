@@ -304,12 +304,12 @@ pub struct CachedRenderData {
     /// RGBA color.
     pub color: [f32; 4],
     /// Mesh group index (determines which shared mesh to draw with).
-    /// 0=rock, 1=bug_hole, 2=hive_mound, 3=egg_cluster, 4=prop_sphere, 5=cube, 6=landmark, 7=hazard
+    /// 0=rock, 1=bug_hole, 2=hive_mound, 3=egg_cluster, 4=prop_sphere, 5=cube, 6=landmark, 7=hazard, 8=beveled_cube
     pub mesh_group: u8,
 }
 
 /// Number of distinct mesh groups for static environment entities.
-pub const ENV_MESH_GROUP_COUNT: usize = 8;
+pub const ENV_MESH_GROUP_COUNT: usize = 9;
 pub const MESH_GROUP_ROCK: u8 = 0;
 pub const MESH_GROUP_BUG_HOLE: u8 = 1;
 pub const MESH_GROUP_HIVE_MOUND: u8 = 2;
@@ -318,6 +318,8 @@ pub const MESH_GROUP_PROP_SPHERE: u8 = 4;
 pub const MESH_GROUP_CUBE: u8 = 5;
 pub const MESH_GROUP_LANDMARK: u8 = 6;
 pub const MESH_GROUP_HAZARD: u8 = 7;
+/// Beveled cube: UCF buildings (industrial, chamfered edges).
+pub const MESH_GROUP_BEVELED_CUBE: u8 = 8;
 
 /// Debris particle component.
 #[derive(Debug, Clone, Copy)]

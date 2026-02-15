@@ -17,6 +17,8 @@ use crate::viewmodel::GroundedShellCasing;
 use crate::horde_ai::apply_separation;
 use crate::skinny::Skinny;
 use crate::smoke::{SmokeCloud, SmokeGrenade};
+use crate::citizen::{update_citizens, Citizen};
+use crate::dialogue::DialogueState;
 use crate::squad::{despawn_squad, update_squad_combat, update_squad_movement, SquadMate};
 use crate::fleet::{self, surface_corvette_positions};
 use crate::artillery::{ArtilleryBarrage, ArtilleryMuzzleFlash, ArtilleryShell, ArtilleryTrailParticle, GroundedArtilleryShell, SHELL_FIRE_DELAY, SHELLS_PER_BARRAGE};
@@ -103,6 +105,66 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
             &mut state.physics,
             MAX_CHUNK_REBUILDS_PER_FRAME,
         );
+    }
+
+    // Earth settlement: citizen AI (schedule + time of day + weather)
+    if state.planet.name == "Earth" && state.settlement_center.is_some() && state.current_planet_idx.is_some() {
+        let center = state.settlement_center.unwrap();
+        let waypoints = state.earth_waypoints.as_deref().unwrap_or(&[]);
+        update_citizens(
+            &mut state.world,
+            state.time_of_day,
+            &state.weather,
+            center,
+            waypoints,
+            dt,
+            |x, z| state.chunk_manager.sample_height(x, z),
+        );
+    }
+
+    // Dialogue: handle open state (number keys = choices, Escape = close)
+    if state.dialogue_state.is_open() {
+        if state.input.is_key_pressed(KeyCode::Escape) {
+            state.dialogue_state = DialogueState::Closed;
+        } else {
+            let idx = if state.input.is_key_pressed(KeyCode::Digit1) { 0 }
+                else if state.input.is_key_pressed(KeyCode::Digit2) { 1 }
+                else if state.input.is_key_pressed(KeyCode::Digit3) { 2 }
+                else if state.input.is_key_pressed(KeyCode::Digit4) { 3 }
+                else { 4 };
+            if idx < 4 {
+                if let Some((_, choices)) = state.dialogue_state.current_line_and_choices() {
+                    if idx < choices.len() {
+                        state.dialogue_state.select_choice(idx);
+                    }
+                }
+            }
+        }
+    } else if state.phase == GamePhase::Playing
+        && state.current_planet_idx.is_some()
+        && state.settlement_center.is_some()
+        && state.input.is_key_pressed(KeyCode::KeyE)
+    {
+        // Find nearest citizen within 3m and open dialogue
+        const TALK_RANGE_SQ: f32 = 3.0 * 3.0;
+        let mut nearest: Option<(Entity, f32, String, usize)> = None;
+        for (entity, (transform, citizen)) in state.world.query::<(&Transform, &Citizen)>().iter() {
+            let dist_sq = transform.position.distance_squared(cam_pos);
+            if dist_sq < TALK_RANGE_SQ {
+                if nearest.as_ref().map(|(_, d, _, _)| *d > dist_sq).unwrap_or(true) {
+                    nearest = Some((entity, dist_sq, citizen.display_name.clone(), citizen.dialogue_id));
+                }
+            }
+        }
+        if let Some((entity, _, name, dialogue_id)) = nearest {
+            state.dialogue_state = DialogueState::Open {
+                speaker_entity: entity,
+                speaker_name: name,
+                dialogue_id,
+                node_index: 0,
+                showing_choices: true,
+            };
+        }
     }
 
     // Update flow field target to player position (for AI)

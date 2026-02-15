@@ -780,6 +780,8 @@ pub enum MissionType {
     Defense,
     /// Destroy bug hive (future).
     HiveDestruction,
+    /// Earth visit — safe zone, resupply & R&R, return to orbit when ready.
+    EarthVisit,
 }
 
 impl MissionType {
@@ -790,6 +792,7 @@ impl MissionType {
             MissionType::HoldTheLine => "Hold the Line",
             MissionType::Defense => "Defense",
             MissionType::HiveDestruction => "Hive Destruction",
+            MissionType::EarthVisit => "Visit Earth",
         }
     }
 }
@@ -870,6 +873,21 @@ impl MissionState {
         }
     }
 
+    /// Earth visit: safe zone, no combat — resupply and return to orbit when ready.
+    pub fn new_earth_visit() -> Self {
+        Self {
+            mission_type: MissionType::EarthVisit,
+            bugs_killed: 0,
+            bugs_remaining: 0,
+            time_elapsed: 0.0,
+            peak_bugs_alive: 0,
+            is_failed: false,
+            kill_target: None,
+            time_target_secs: None,
+            objective_complete: true, // extract anytime
+        }
+    }
+
     pub fn update(&mut self, dt: f32, _player_alive: bool) {
         self.time_elapsed += dt;
 
@@ -914,6 +932,7 @@ impl MissionState {
                 let sec = (s % 60.0) as u32;
                 format!("Hold position {:02}:{:02}", m, sec)
             }),
+            MissionType::EarthVisit => Some("Visit — return to orbit when ready".to_string()),
             _ => None,
         }
     }

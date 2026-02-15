@@ -1,5 +1,6 @@
 //! Universe generation: galaxies of star systems.
 
+use crate::planet::Planet;
 use crate::star_system::{StarSystem, StarType, Star};
 use glam::DVec3;
 use rand::prelude::*;
@@ -64,12 +65,19 @@ impl Universe {
     }
 
     /// Generate the full StarSystem for entry at `index`.
+    /// System index 0 is Sol: first planet is Earth (homeworld, visitable; Starship Troopers aesthetic).
     pub fn generate_system(&mut self, index: usize) -> StarSystem {
         if let Some(entry) = self.systems.get_mut(index) {
             entry.visited = true;
             let mut system = StarSystem::generate(entry.seed);
             system.galaxy_position = entry.position;
             system.name = entry.name.clone();
+            if index == 0 {
+                system.name = "Sol System".to_string();
+                if !system.bodies.is_empty() {
+                    system.bodies[0].planet = Planet::earth();
+                }
+            }
             system
         } else {
             // Fallback: generate from universe seed

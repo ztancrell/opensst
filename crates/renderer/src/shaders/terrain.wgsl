@@ -738,11 +738,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let slope_factor = smoothstep(0.15, 0.55, slope);
     let height = world_p.y;
 
-    // ---- BIOME DETECTION FROM VERTEX COLOR ----
-    // Use the biome_color to drive material selection
-    let biome_tint = select(terrain.biome_colors[0].rgb, in.biome_color.rgb, in.biome_color.a > 0.01);
+    // ---- BIOME TINT FROM VERTEX COLOR ----
+    // Vertex color carries per-vertex biome blend from procgen; use it as primary tint.
+    // Fallback to uniform when vertex color is missing (alpha 0) or effectively black (uninitialized).
+    let vertex_rgb = in.biome_color.rgb;
+    let has_vertex_color = in.biome_color.a > 0.01 && (vertex_rgb.r + vertex_rgb.g + vertex_rgb.b) > 0.05;
+    let biome_tint = select(terrain.biome_colors[0].rgb, vertex_rgb, has_vertex_color);
 
-    // Classify biome from color heuristics
+    // Classify biome from color heuristics (for procedural material selection)
     let warmth = biome_tint.r - biome_tint.b;
     let greenness = biome_tint.g - max(biome_tint.r, biome_tint.b);
     let coldness = biome_tint.b - biome_tint.r;
@@ -809,8 +812,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let height_tint = smoothstep(-5.0, 20.0, height);
     albedo *= mix(0.85, 1.08, height_tint);
 
-    // Apply biome tint to unify the look
-    albedo *= biome_tint * 1.3;
+    // Vertex biome color is the main driver: blend procedural with vertex tint so terrain shows
+    // clear biome variation (sand, rock, volcanic, etc.) instead of grey/white/black.
+    let procedural_only = albedo;
+    let tinted = albedo * biome_tint;
+    albedo = mix(procedural_only, tinted, 0.75);
+    albedo *= 1.15;
 
     // Erosion streaks on slopes (vertical dark lines from water erosion)
     // Also reduce at chunk edges
@@ -831,11 +838,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Ambient occlusion from normal (crevices darker)
     let ao = smoothstep(-0.2, 0.3, n.y) * 0.5 + 0.5;
 
-    // Hemisphere ambient (sky from above, ground bounce from below)
-    let sky_ambient = vec3<f32>(0.18, 0.20, 0.28) * day_factor;
-    let ground_bounce = vec3<f32>(0.06, 0.05, 0.04) * day_factor;
-    // Night ambient: warm tint from nebula glow in the populated space above
-    let night_ambient = vec3<f32>(0.032, 0.028, 0.040);
+    // Hemisphere ambient: raised so shadows stay visible and colored, not pure black
+    let sky_ambient = vec3<f32>(0.28, 0.30, 0.36) * day_factor;
+    let ground_bounce = vec3<f32>(0.12, 0.10, 0.08) * day_factor;
+    let night_ambient = vec3<f32>(0.08, 0.06, 0.09);
     let ambient_light = mix(night_ambient, mix(ground_bounce, sky_ambient, n.y * 0.5 + 0.5), day_factor) * ao;
 
     // Diffuse: warm at golden hour, neutral at noon
@@ -845,11 +851,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_color = mix(noon_light, warm_light, golden_hour);
     let n_dot_l = max(dot(n, light_dir), 0.0);
 
-    // MIRO-style cel/toon shading: 3-step lighting (stylized, colorful)
-    let half_lambert = n_dot_l * 0.7 + 0.3;
-    let toon_bands = 3.0;
+    // Softer toon shading: more bands + smooth ramp so terrain has midtones, not just white/black
+    let half_lambert = n_dot_l * 0.65 + 0.35;
+    let toon_bands = 6.0;
     let toon_lambert = floor(half_lambert * toon_bands + 0.5) / toon_bands;
-    let diffuse = sun_color * toon_lambert * sun_intensity;
+    let smooth_lambert = mix(toon_lambert, half_lambert, 0.35);
+    let diffuse = sun_color * smooth_lambert * sun_intensity;
 
     // Specular: Blinn-Phong with roughness variation (slightly sharper for stylized look)
     let h = normalize(light_dir + view_dir);

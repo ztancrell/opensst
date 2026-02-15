@@ -488,14 +488,18 @@ impl TerrainData {
         x >= min_x && x <= max_x && z >= min_z && z <= max_z
     }
 
-    /// Deform terrain by lowering a crater at `(center_x, center_z)` in world space.
+    /// Deform terrain with a realistic impact crater: flat floor, steep walls, raised rim (ejecta).
     /// Returns `true` if any vertices were modified (mesh/collider need rebuild).
-    /// With voxel_size: blocky Castle Miner Z–style crater (quantized to voxel grid).
+    /// Profile: flat floor from center to ~35% radius, steep wall to rim, then raised rim to ~115% radius.
     pub fn deform_crater(&mut self, center_x: f32, center_z: f32, radius: f32, depth: f32) -> bool {
         let res = self.config.resolution as usize;
         let step = self.config.size / (self.config.resolution - 1) as f32;
         let half_size = self.config.size / 2.0;
         let r2 = radius * radius;
+        let rim_radius = radius * 1.15;
+        let rim_radius2 = rim_radius * rim_radius;
+        let floor_frac = 0.35; // flat floor out to 35% of radius
+        let rim_height = depth * 0.25; // ejecta berm height
         let voxel_size = self.config.voxel_size;
         let mut modified = false;
 
@@ -507,11 +511,33 @@ impl TerrainData {
                 let dx = vx - center_x;
                 let dz = vz - center_z;
                 let dist2 = dx * dx + dz * dz;
+                let norm_r = (dist2 / r2).sqrt();
+
                 if dist2 < r2 {
-                    let t = 1.0 - (dist2 / r2).sqrt();
-                    let falloff = t * t * (3.0 - 2.0 * t);
-                    let lower = depth * falloff;
+                    // Inside crater: flat floor (center) then steep wall to rim
+                    let lower = if norm_r <= floor_frac {
+                        depth // flat floor
+                    } else {
+                        // steep wall: smoothstep from depth at floor_frac to 0 at 1.0
+                        let t = (norm_r - floor_frac) / (1.0 - floor_frac);
+                        let t = t.clamp(0.0, 1.0);
+                        let s = t * t * (3.0 - 2.0 * t);
+                        depth * (1.0 - s)
+                    };
                     let new_height = self.heightmap[idx] - lower;
+                    let final_height = match voxel_size {
+                        Some(vs) => quantize_height(new_height, vs),
+                        None => new_height,
+                    };
+                    self.heightmap[idx] = final_height;
+                    self.vertices[idx].position[1] = final_height;
+                    modified = true;
+                } else if dist2 < rim_radius2 {
+                    // Raised rim (ejecta): ramp up from crater edge to peak at mid-rim, then down
+                    let t = (norm_r - 1.0) / 0.15; // 0 at edge, 1 at rim_radius
+                    let t = t.clamp(0.0, 1.0);
+                    let raise = rim_height * 4.0 * t * (1.0 - t); // peak at t=0.5
+                    let new_height = self.heightmap[idx] + raise;
                     let final_height = match voxel_size {
                         Some(vs) => quantize_height(new_height, vs),
                         None => new_height,

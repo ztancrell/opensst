@@ -202,6 +202,17 @@ Built with:
 - [hecs](https://github.com/Ralith/hecs) - ECS
 - [glam](https://github.com/bitshifter/glam-rs) - Math
 
+### Faster iteration (no manual build/run each time)
+
+Use [cargo-watch](https://github.com/watchexec/cargo-watch) so the game rebuilds and runs automatically when you save a file:
+
+```bash
+cargo install cargo-watch
+cargo watch -x run
+```
+
+On any save, `cargo watch` runs `cargo run` (build + run). Use `cargo watch -x build` if you only want to recompile without running.
+
 ## License
 
 MIT License

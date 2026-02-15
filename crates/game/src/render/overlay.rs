@@ -5,6 +5,7 @@ use glam::Vec3;
 use procgen::StarType;
 use renderer::OverlayTextBuilder;
 
+use crate::earth_territory;
 use crate::extraction::{self, ExtractionPhase};
 use crate::roger_young_interior_npcs;
 use crate::squad::SquadMate;
@@ -114,21 +115,33 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
         tb.add_text_with_bg(x, y, &planet_text, scale, [0.8, 1.0, 0.6, 1.0], bg);
         y += line_h;
 
+        // Earth territory: show current place (city, town, farm)
+        if state.planet.name == "Earth" && state.settlement_center.is_some() {
+            if let Some(place_name) = earth_territory::place_name_at(state.player.position.x, state.player.position.z) {
+                tb.add_text_with_bg(x, y, &format!("Location: {}", place_name), scale, [0.4, 0.85, 0.6, 1.0], bg);
+                y += line_h;
+            }
+        }
+
         if state.current_planet_idx.is_some() {
             let chunks_text = format!("Chunks: {}", state.chunk_manager.chunks.len());
             tb.add_text_with_bg(x, y, &chunks_text, scale, gray, bg);
             y += line_h;
 
             let bugs_alive = state.count_living_bugs();
-            let threat = &state.spawner.threat_level;
+            let (threat_name, threat_color) = if state.planet.name == "Earth" {
+                ("Safe zone", [0.2, 0.7, 0.4, 1.0])
+            } else {
+                (state.spawner.threat_level.name(), state.spawner.threat_level.color())
+            };
             let bugs_text = format!(
                 "Bugs: {}  Kills: {}  Time: {}  Threat: {}",
                 bugs_alive,
                 state.mission.bugs_killed,
                 state.spawner.time_survived_str(),
-                threat.name(),
+                threat_name,
             );
-            tb.add_text_with_bg(x, y, &bugs_text, scale, threat.color(), bg);
+            tb.add_text_with_bg(x, y, &bugs_text, scale, threat_color, bg);
             y += line_h;
 
             let tod_name = if state.time_of_day < 0.125 { "Dawn" }
@@ -439,7 +452,10 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                         let is_sel = i == selected;
 
                         let node_size = if is_sel { 24.0 } else { 16.0 };
-                        let node_color = if war_status.map_or(false, |s| s.liberated) {
+                        let is_earth = planet.name == "Earth";
+                        let node_color = if is_earth {
+                            [0.15, 0.45, 0.6, 0.85] // Safe zone: calm blue-green
+                        } else if war_status.map_or(false, |s| s.liberated) {
                             [0.15, 0.5, 0.2, 0.8]
                         } else if is_sel {
                             [0.3, 0.5, 0.9, 0.9]
@@ -482,16 +498,26 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                     let ds = 1.5;
                     let line_hd = 18.0;
                     tb.add_text(dx, dy, &format!("TARGET: {}", dp.name), ds, [1.0, 0.9, 0.5, 1.0]); dy += line_hd;
-                    tb.add_text(dx, dy, &format!("Mission: {} | Biome: {:?} | Danger: {}/10", state.next_mission_type.name(), dp.primary_biome, dp.danger_level), ds, [0.7, 0.7, 0.8, 1.0]); dy += line_hd;
-                    let lib_val = dws.map_or(0.0, |s| s.liberation);
-                    tb.add_text(dx, dy, &format!("Liberation: {:.0}% | Kills: {} | Extractions: {}",
-                        lib_val * 100.0,
-                        dws.map_or(0, |s| s.total_kills),
-                        dws.map_or(0, |s| s.successful_extractions),
-                    ), ds, [0.5, 0.6, 0.7, 0.9]); dy += line_hd;
-                    if dws.map_or(false, |s| s.defense_urgency > 0.1) {
-                        let flash = (timer * 4.0).sin() * 0.3 + 0.7;
-                        tb.add_text(dx, dy, "!! BUGS COUNTER-ATTACKING !!", ds, [1.0, 0.3 * flash, 0.1, flash]);
+                    let is_earth = dp.name == "Earth";
+                    if is_earth {
+                        // Earth: no danger counter — safe zone, visit only
+                        tb.add_text(dx, dy, "Mission: Visit | Biome: All", ds, [0.7, 0.7, 0.8, 1.0]); dy += line_hd;
+                        tb.add_text(dx, dy, "Safe zone — no combat. Homeworld.", ds, [0.4, 0.7, 0.5, 0.9]); dy += line_hd;
+                    } else {
+                        let mission_str = state.next_mission_type.name().to_string();
+                        let biome_str = format!("{:?}", dp.primary_biome);
+                        let danger_str = format!("{}/10", dp.danger_level);
+                        tb.add_text(dx, dy, &format!("Mission: {} | Biome: {} | Danger: {}", mission_str, biome_str, danger_str), ds, [0.7, 0.7, 0.8, 1.0]); dy += line_hd;
+                        let lib_val = dws.map_or(0.0, |s| s.liberation);
+                        tb.add_text(dx, dy, &format!("Liberation: {:.0}% | Kills: {} | Extractions: {}",
+                            lib_val * 100.0,
+                            dws.map_or(0, |s| s.total_kills),
+                            dws.map_or(0, |s| s.successful_extractions),
+                        ), ds, [0.5, 0.6, 0.7, 0.9]); dy += line_hd;
+                        if dws.map_or(false, |s| s.defense_urgency > 0.1) {
+                            let flash = (timer * 4.0).sin() * 0.3 + 0.7;
+                            tb.add_text(dx, dy, "!! BUGS COUNTER-ATTACKING !!", ds, [1.0, 0.3 * flash, 0.1, flash]);
+                        }
                     }
 
                     let ctrl = "[↑/↓ or W/Q] System   [A/D] Planet   [1-5] Mission   [E] Close   [SPACE] Deploy";
@@ -1071,6 +1097,35 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                 tb.add_rect(0.0, 0.0, sw, v * 0.5, [ft[0] * 0.3, ft[1] * 0.3, ft[2] * 0.3, vig_alpha * 0.7]);
                 tb.add_rect(0.0, sh - v * 0.5, sw, v * 0.5, [ft[0] * 0.3, ft[1] * 0.3, ft[2] * 0.3, vig_alpha]);
             }
+        }
+    }
+
+    // ---- Dialogue box (Earth settlement — Starship Troopers style) ----
+    if state.dialogue_state.is_open() {
+        if let Some((line_text, choices)) = state.dialogue_state.current_line_and_choices() {
+            let speaker_name = match &state.dialogue_state {
+                crate::dialogue::DialogueState::Open { speaker_name, .. } => speaker_name.as_str(),
+                _ => "",
+            };
+            let box_w = (line_text.len() as f32 * 6.0 * 1.2).max(280.0).min(sw - 40.0);
+            let box_h = 24.0 + 28.0 + (choices.len() as f32 * 18.0);
+            let box_x = sw * 0.5 - box_w * 0.5;
+            let box_y = sh - box_h - 24.0;
+            tb.add_rect(box_x - 4.0, box_y - 4.0, box_w + 8.0, box_h + 8.0, [0.06, 0.08, 0.12, 0.92]);
+            tb.add_rect(box_x, box_y, box_w, 20.0, [0.25, 0.35, 0.45, 0.95]);
+            tb.add_text(box_x + 6.0, box_y + 2.0, &format!("{}", speaker_name), 1.4, [0.9, 0.85, 0.7, 1.0]);
+            let max_chars = 70;
+            let line_trim: String = if line_text.chars().count() > max_chars {
+                line_text.chars().take(max_chars).chain("...".chars()).collect()
+            } else {
+                line_text.clone()
+            };
+            tb.add_text(box_x + 6.0, box_y + 24.0, &line_trim, 1.1, [0.85, 0.88, 0.9, 1.0]);
+            for (i, (choice_label, _)) in choices.iter().enumerate() {
+                let key = (i + 1).to_string();
+                tb.add_text(box_x + 6.0, box_y + 44.0 + i as f32 * 18.0, &format!("[{}] {}", key, choice_label), 1.0, [0.5, 0.75, 1.0, 1.0]);
+            }
+            tb.add_text(sw * 0.5 - 60.0, sh - 14.0, "1-4 = choose  Esc = close", 1.0, gray);
         }
     }
 

@@ -20,11 +20,12 @@ use crate::destruction::{
     BugCorpse, BugGoreChunk, CachedRenderData, Debris, Destructible,
     MESH_GROUP_ROCK, MESH_GROUP_BUG_HOLE, MESH_GROUP_EGG_CLUSTER, MESH_GROUP_PROP_SPHERE,
     MESH_GROUP_CUBE, MESH_GROUP_LANDMARK, MESH_GROUP_HAZARD, MESH_GROUP_HIVE_MOUND,
-    ENV_MESH_GROUP_COUNT,
+    MESH_GROUP_BEVELED_CUBE, ENV_MESH_GROUP_COUNT,
 };
 use crate::extraction::{ExtractionDropship, ExtractionPhase, roger_young_parts};
 use crate::fleet::{surface_corvette_positions, SURFACE_CORVETTE_PARAMS};
 use crate::fps;
+use crate::citizen::Citizen;
 use crate::squad::{SquadMate, SquadMateKind};
 use crate::weapons::WeaponType;
 use crate::{
@@ -306,12 +307,22 @@ pub fn run(state: &mut GameState) -> Result<()> {
         // Biome atmosphere tints the tertiary/quaternary terrain colors for fog blending
         let fog_t = &state.biome_atmosphere.config.fog_tint;
         let amb_t = &state.biome_atmosphere.config.ambient_tint;
-        let biome_colors = [
-            [biome.base_color.x, biome.base_color.y, biome.base_color.z, 1.0],
-            [biome.secondary_color.x, biome.secondary_color.y, biome.secondary_color.z, 1.0],
-            [fog_t[0] * 0.6 + 0.2, fog_t[1] * 0.6 + 0.2, fog_t[2] * 0.6 + 0.2, 1.0],
-            [amb_t[0] * 0.5 + 0.25, amb_t[1] * 0.5 + 0.25, amb_t[2] * 0.5 + 0.25, 1.0],
-        ];
+        // Earth: more colorful surface — greens, warm earth, blue sky tint (homeworld palette)
+        let biome_colors = if state.planet.name == "Earth" {
+            [
+                [0.35, 0.52, 0.28, 1.0],   // base: grass/green
+                [0.55, 0.48, 0.38, 1.0],   // secondary: warm earth
+                [0.45, 0.65, 0.85, 1.0],   // fog: sky blue
+                [0.5, 0.6, 0.5, 1.0],      // ambient: soft green
+            ]
+        } else {
+            [
+                [biome.base_color.x, biome.base_color.y, biome.base_color.z, 1.0],
+                [biome.secondary_color.x, biome.secondary_color.y, biome.secondary_color.z, 1.0],
+                [fog_t[0] * 0.6 + 0.2, fog_t[1] * 0.6 + 0.2, fog_t[2] * 0.6 + 0.2, 1.0],
+                [amb_t[0] * 0.5 + 0.25, amb_t[1] * 0.5 + 0.25, amb_t[2] * 0.5 + 0.25, 1.0],
+            ]
+        };
 
         // Planet physical parameters (vary by planet size)
         let planet_radius: f32 = match state.planet.size {
@@ -334,9 +345,11 @@ pub fn run(state: &mut GameState) -> Result<()> {
             (400.0 / (biome_fog_mult * 0.5 + 0.5)) * alt_fog_mult, // shorter visibility for thick biomes
         ];
 
-        // Planet surface color for the orbital view
-        // Weight the primary biome heavily so orbital color matches surface
-        let planet_surface_color = {
+        // Planet surface color for the orbital view and sky horizon
+        // Earth: vivid green/blue so surface and sky feel like homeworld
+        let planet_surface_color: [f32; 3] = if state.planet.name == "Earth" {
+            [0.22, 0.48, 0.32] // green earth + blue tint for horizon
+        } else {
             let primary_cfg = state.planet.get_biome_config();
             let primary_col = primary_cfg.base_color;
             let biomes = &state.chunk_manager.planet_biomes.biomes;
@@ -350,7 +363,6 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 }
             }
             if count > 0 { secondary_avg /= count as f32; }
-            // 70% primary biome, 30% secondary biomes for strong visual identity
             let final_col = primary_col * 0.70 + secondary_avg * 0.30;
             [final_col.x, final_col.y, final_col.z]
         };
@@ -401,9 +413,8 @@ pub fn run(state: &mut GameState) -> Result<()> {
         let celestial_instances = state.build_celestial_instances();
         state.renderer.render_celestial(&mut encoder, &scene_view, &celestial_instances);
 
-        // Pass 0b0: Federation fleet visible from planet surface (HellDivers 2 style)
-        // Draw early (after sky/celestial) so ships are in the sky dome — large scale for visibility
-        // Also show during extraction orbit (climb from surface) so Roger Young + fleet are visible
+        // Pass 0b0: Federation fleet visible from planet surface — Starship Troopers style
+        // Multi-part ships: hull + bridge/superstructure + engine glow; military grey/blue-grey, bright engines
         if (!in_space_view || extraction_orbit) && state.current_planet_idx.is_some() && state.phase == GamePhase::Playing {
             let ot = state.orbital_time as f32;
             let t = state.time.elapsed_seconds();
@@ -415,30 +426,46 @@ pub fn run(state: &mut GameState) -> Result<()> {
             );
             let mut fleet_hull: Vec<InstanceData> = Vec::new();
             let mut fleet_glow: Vec<InstanceData> = Vec::new();
-            let hull = [0.14, 0.16, 0.21, 1.0];
-            let engine = [0.2, 0.42, 0.68, 0.6];
-            // Corvettes: large silhouettes — tac fighters launch from and RTB to these
+            // UCF/MI colors: gunmetal hull, darker trim, bright blue engine
+            let hull_corvette = [0.18, 0.20, 0.26, 1.0];   // Corvette: slate blue-grey
+            let hull_destroyer = [0.12, 0.14, 0.19, 1.0];  // Destroyer: darker capital ship
+            let bridge_color = [0.22, 0.24, 0.30, 1.0];   // Command section slightly lighter
+            let engine_corvette = [0.25, 0.50, 0.85, 0.75];
+            let engine_destroyer = [0.28, 0.55, 0.92, 0.8];
+
+            // Corvettes: angular hull + bridge block + engine (Starship Troopers patrol craft)
             for (i, &(radius, phase, speed)) in SURFACE_CORVETTE_PARAMS.iter().enumerate() {
                 let angle = phase + ot * speed + t * 0.015;
                 let pos = corvette_positions[i];
                 let facing = Vec3::new(-angle.sin(), 0.0, angle.cos());
                 let rot = Quat::from_rotation_arc(Vec3::Z, facing);
-                let scale_len = 35.0 + (i as f32 * 0.08).sin() * 5.0; // ~35 units long
-                let m = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(3.0, 1.2, scale_len),
+                let scale_len = 35.0 + (i as f32 * 0.08).sin() * 5.0;
+                let half_len = scale_len * 0.5;
+                // Main hull (elongated, flat)
+                let m_hull = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(2.8, 1.0, scale_len),
                     rot,
                     pos,
                 );
-                fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), hull));
-                let stern = pos - facing * scale_len * 0.55;
+                fleet_hull.push(InstanceData::new(m_hull.to_cols_array_2d(), hull_corvette));
+                // Bridge/superstructure (small block on top, offset forward)
+                let bridge_pos = pos + facing * half_len * 0.25 + Vec3::new(0.0, 1.4, 0.0);
+                let m_bridge = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(1.4, 0.6, 2.5),
+                    rot,
+                    bridge_pos,
+                );
+                fleet_hull.push(InstanceData::new(m_bridge.to_cols_array_2d(), bridge_color));
+                // Engine glow
+                let stern = pos - facing * half_len * 1.1;
                 let g = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(1.5, 0.8, 1.2),
+                    Vec3::new(1.4, 0.7, 1.4),
                     Quat::IDENTITY,
                     stern,
                 );
-                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine));
+                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_corvette));
             }
-            // Destroyers: massive silhouettes in the sky
+            // Destroyers: capital-ship silhouette — hull + tall command tower + dual engine glow
             let d_angle = ot * 0.07 + t * 0.008;
             let d_radius = 220.0;
             for (i, &(phase_off, y_off)) in [
@@ -455,19 +482,151 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 let facing = Vec3::new(-a.sin(), 0.0, a.cos());
                 let rot = Quat::from_rotation_arc(Vec3::Z, facing);
                 let scale_len = 70.0 + (i as f32 * 0.1).sin() * 5.0;
-                let m = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(4.5, 2.0, scale_len),
+                let half_len = scale_len * 0.5;
+                // Main hull (long, low)
+                let m_hull = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(4.2, 1.6, scale_len),
                     rot,
                     pos,
                 );
-                fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), hull));
-                let stern = pos - facing * scale_len * 0.5;
+                fleet_hull.push(InstanceData::new(m_hull.to_cols_array_2d(), hull_destroyer));
+                // Command tower (tall block amidships — Roger Young style)
+                let tower_pos = pos + facing * half_len * 0.1 + Vec3::new(0.0, 2.8, 0.0);
+                let m_tower = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(2.2, 2.2, 2.8),
+                    rot,
+                    tower_pos,
+                );
+                fleet_hull.push(InstanceData::new(m_tower.to_cols_array_2d(), bridge_color));
+                // Stern engine glow (larger, brighter)
+                let stern = pos - facing * half_len * 1.0;
                 let g = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(2.5, 1.2, 2.0),
+                    Vec3::new(2.8, 1.4, 2.4),
                     Quat::IDENTITY,
                     stern,
                 );
-                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), [0.25, 0.5, 0.78, 0.65]));
+                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_destroyer));
+            }
+            // Earth atmosphere: bustling spaceport — extra MI corvettes, destroyers, dropships (Starship Troopers style)
+            let is_earth = state.planet.name == "Earth";
+            if is_earth {
+                let hull_earth = [0.16, 0.18, 0.24, 1.0];  // Slightly lighter for Earth fleet
+                let engine_earth = [0.26, 0.52, 0.88, 0.7];
+                // Extra corvettes (multi-part: hull + bridge + engine)
+                for (i, &(radius, phase, speed, y_off)) in [
+                    (115.0f32, 0.4, 0.17, 60.0),
+                    (145.0, 2.5, 0.13, -45.0),
+                    (88.0, 1.6, 0.20, 95.0),
+                    (125.0, 4.0, 0.14, -20.0),
+                    (72.0, 3.2, 0.21, 110.0),
+                    (155.0, 5.6, 0.11, -75.0),
+                    (98.0, 0.9, 0.19, 50.0),
+                    (135.0, 3.0, 0.12, 85.0),
+                ].iter().enumerate() {
+                    let angle = phase + ot * speed + t * 0.018;
+                    let pos = Vec3::new(
+                        cam_pos.x + angle.cos() * radius,
+                        sky_y + y_off + (t * 0.25 + i as f32).sin() * 12.0,
+                        cam_pos.z + angle.sin() * radius,
+                    );
+                    let facing = Vec3::new(-angle.sin(), 0.0, angle.cos());
+                    let rot = Quat::from_rotation_arc(Vec3::Z, facing);
+                    let scale_len = 32.0 + (i as f32 * 0.12).sin() * 4.0;
+                    let half_len = scale_len * 0.5;
+                    let m = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(2.4, 0.9, scale_len),
+                        rot,
+                        pos,
+                    );
+                    fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), hull_earth));
+                    let bridge_pos = pos + facing * half_len * 0.2 + Vec3::new(0.0, 1.2, 0.0);
+                    let m_bridge = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(1.2, 0.5, 2.0),
+                        rot,
+                        bridge_pos,
+                    );
+                    fleet_hull.push(InstanceData::new(m_bridge.to_cols_array_2d(), bridge_color));
+                    let stern = pos - facing * half_len * 1.1;
+                    let g = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(1.1, 0.6, 1.2),
+                        Quat::IDENTITY,
+                        stern,
+                    );
+                    fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_earth));
+                }
+                // Extra destroyers (hull + tower + engine)
+                for (i, &(phase_off, rad_off, y_off)) in [
+                    (0.5f32, 200.0, 140.0),
+                    (std::f32::consts::PI * 0.4, 240.0, -80.0),
+                    (std::f32::consts::PI * 1.2, 190.0, 60.0),
+                    (std::f32::consts::PI * 0.8, 260.0, -120.0),
+                ].iter().enumerate() {
+                    let a = d_angle + phase_off + t * 0.006;
+                    let pos = Vec3::new(
+                        cam_pos.x + a.cos() * rad_off,
+                        sky_y + y_off,
+                        cam_pos.z + a.sin() * rad_off,
+                    );
+                    let facing = Vec3::new(-a.sin(), 0.0, a.cos());
+                    let rot = Quat::from_rotation_arc(Vec3::Z, facing);
+                    let scale_len = 65.0 + (i as f32 * 0.08).sin() * 6.0;
+                    let half_len = scale_len * 0.5;
+                    let m = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(3.8, 1.5, scale_len),
+                        rot,
+                        pos,
+                    );
+                    fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), hull_destroyer));
+                    let tower_pos = pos + facing * half_len * 0.05 + Vec3::new(0.0, 2.4, 0.0);
+                    let m_tower = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(1.8, 1.9, 2.4),
+                        rot,
+                        tower_pos,
+                    );
+                    fleet_hull.push(InstanceData::new(m_tower.to_cols_array_2d(), bridge_color));
+                    let stern = pos - facing * half_len * 1.0;
+                    let g = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(2.4, 1.2, 2.0),
+                        Quat::IDENTITY,
+                        stern,
+                    );
+                    fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_destroyer));
+                }
+                // Dropships (compact hull + engine — troop carriers)
+                for (i, &(radius, phase, speed, y_off)) in [
+                    (68.0f32, 1.1, 0.23, 130.0),
+                    (102.0, 2.7, 0.16, -55.0),
+                    (78.0, 4.3, 0.19, 75.0),
+                    (92.0, 0.2, 0.18, -35.0),
+                    (85.0, 3.5, 0.20, 90.0),
+                    (110.0, 5.2, 0.15, -65.0),
+                    (72.0, 1.8, 0.22, 105.0),
+                    (96.0, 2.9, 0.17, -15.0),
+                ].iter().enumerate() {
+                    let angle = phase + ot * speed + t * 0.022;
+                    let pos = Vec3::new(
+                        cam_pos.x + angle.cos() * radius,
+                        sky_y + y_off + (t * 0.2 + i as f32 * 0.7).sin() * 8.0,
+                        cam_pos.z + angle.sin() * radius,
+                    );
+                    let facing = Vec3::new(-angle.sin(), 0.0, angle.cos());
+                    let rot = Quat::from_rotation_arc(Vec3::Z, facing);
+                    let scale_len = 18.0 + (i as f32 * 0.1).sin() * 3.0;
+                    let dropship_hull = [0.20, 0.22, 0.28, 1.0]; // Lighter grey for dropships
+                    let m = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(1.3, 0.65, scale_len),
+                        rot,
+                        pos,
+                    );
+                    fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), dropship_hull));
+                    let stern = pos - facing * scale_len * 0.5;
+                    let g = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.65, 0.35, 0.7),
+                        Quat::IDENTITY,
+                        stern,
+                    );
+                    fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), [0.22, 0.42, 0.72, 0.6]));
+                }
             }
             if !fleet_hull.is_empty() {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.cube, &fleet_hull);
@@ -497,16 +656,14 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 0b1: Fleet corvettes in space (main menu, approach flight — NOT extraction orbit;
-        // extraction climb uses Pass 0b0 for visible fleet + Pass 5h2 for Roger Young)
+        // Pass 0b1: Fleet in space (main menu, approach) — Starship Troopers palette
         if in_space_view && !extraction_orbit {
             let ot = state.orbital_time as f32;
             let t = state.time.elapsed_seconds();
-            let mut fleet_rock: Vec<InstanceData> = Vec::new();
+            let mut fleet_hull: Vec<InstanceData> = Vec::new();
             let mut fleet_glow: Vec<InstanceData> = Vec::new();
-            let hull = [0.14, 0.16, 0.22, 1.0];  // Slightly brighter for contrast on dark space
-            let engine = [0.18, 0.35, 0.65, 0.6]; // Brighter engine glow
-            // Corvettes: drift in space around the camera (distant background fleet)
+            let hull_c = [0.18, 0.20, 0.26, 1.0];
+            let engine_c = [0.24, 0.48, 0.82, 0.65];
             for (i, &(radius, phase, speed, y_off)) in [
                 (550.0f32, 0.0, 0.12, 80.0),
                 (720.0, 1.8, 0.09, -60.0),
@@ -529,16 +686,17 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     rot,
                     pos,
                 );
-                fleet_rock.push(InstanceData::new(m.to_cols_array_2d(), hull));
+                fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), hull_c));
                 let stern = pos - facing * scale_len * 0.5;
                 let g = glam::Mat4::from_scale_rotation_translation(
                     Vec3::new(0.15, 0.08, 0.12),
                     Quat::IDENTITY,
                     stern,
                 );
-                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine));
+                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_c));
             }
-            // Two destroyers further out (larger silhouettes in the deep background)
+            let hull_d = [0.12, 0.14, 0.19, 1.0];
+            let engine_d = [0.28, 0.55, 0.92, 0.7];
             let d_angle = ot * 0.06 + t * 0.01;
             for (i, &(phase_off, dist, y_off)) in [(0.0f32, 1100.0, 150.0), (std::f32::consts::PI, 950.0, -100.0)].iter().enumerate() {
                 let a = d_angle + phase_off;
@@ -553,17 +711,17 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     rot,
                     pos,
                 );
-                fleet_rock.push(InstanceData::new(m.to_cols_array_2d(), [0.15, 0.17, 0.23, 1.0]));
+                fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), hull_d));
                 let stern = pos - rot * Vec3::Z * 2.0;
                 let g = glam::Mat4::from_scale_rotation_translation(
                     Vec3::new(0.25, 0.15, 0.2),
                     Quat::IDENTITY,
                     stern,
                 );
-                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), [0.2, 0.4, 0.7, 0.55]));
+                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_d));
             }
-            if !fleet_rock.is_empty() {
-                state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.rock, &fleet_rock);
+            if !fleet_hull.is_empty() {
+                state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.cube, &fleet_hull);
             }
             if !fleet_glow.is_empty() {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.flash_mesh, &fleet_glow);
@@ -615,7 +773,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 0b2: Federation destroyers (ship interior; warp) — realistic scale and depth
+        // Pass 0b2: Federation destroyers (ship interior; warp) — Starship Troopers capital ships
         let warp_active = state.warp_sequence.is_some();
         let ship_interior_visible = warp_active
             || ((state.phase == GamePhase::InShip || state.phase == GamePhase::ApproachPlanet)
@@ -624,13 +782,14 @@ pub fn run(state: &mut GameState) -> Result<()> {
             let timer = state.ship_state.as_ref().map_or(0.0, |s| s.timer);
             let ot = state.orbital_time as f32;
             let fleet_scale = if in_ship_interior { 2.4 } else { 1.0 };
-            let mut destroyer_rock: Vec<InstanceData> = Vec::new();
+            let mut destroyer_hull: Vec<InstanceData> = Vec::new();
             let mut destroyer_glow: Vec<InstanceData> = Vec::new();
-            let hull_color = [0.12, 0.14, 0.18, 1.0]; // dark hull silhouette
-            let engine_glow = [0.18, 0.35, 0.55, 0.4]; // engine glow (emissive)
-            // Destroyers: capital-ship scale (~35–45 units long like Roger Young), at fleet distance (250–650)
+            let hull_d = [0.11, 0.13, 0.18, 1.0];  // Dark gunmetal
+            let tower_d = [0.18, 0.20, 0.26, 1.0];  // Command tower
+            let engine_d = [0.26, 0.52, 0.88, 0.65];
+
             let destroyer_specs: [(f32, f32, f32, f32); 6] = [
-                (0.0, 30.0, 380.0, 38.0),   // center, ahead
+                (0.0, 30.0, 380.0, 38.0),
                 (-140.0, 20.0, 480.0, 42.0),
                 (100.0, -15.0, 320.0, 35.0),
                 (160.0, 35.0, 580.0, 40.0),
@@ -642,32 +801,44 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 let wobble = (timer * 0.15 + i as f32).sin() * 4.0;
                 let pos = Vec3::new(x_off + wobble, y_off + (timer * 0.1 + i as f32 * 0.5).sin() * 3.0, z);
                 let rot_y = timer * 0.03 + i as f32 * 0.15;
+                let rot = Quat::from_rotation_y(rot_y);
+                let fwd = rot * -Vec3::Z;
+                // Main hull (elongated cube)
                 let matrix = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(1.4 * fleet_scale, 0.55 * fleet_scale, len), // hull cross-section and length
-                    Quat::from_rotation_y(rot_y),
+                    Vec3::new(1.35 * fleet_scale, 0.5 * fleet_scale, len),
+                    rot,
                     pos,
                 );
-                destroyer_rock.push(InstanceData::new(matrix.to_cols_array_2d(), hull_color));
-                let stern = pos - Vec3::new(0.0, 0.0, len * 0.55);
+                destroyer_hull.push(InstanceData::new(matrix.to_cols_array_2d(), hull_d));
+                // Command tower (block on top, amidships)
+                let tower_pos = pos + Vec3::new(0.0, 1.8 * fleet_scale, 0.0) + fwd * len * 0.08;
+                let tower_mat = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.9 * fleet_scale, 1.0 * fleet_scale, 1.2 * fleet_scale),
+                    rot,
+                    tower_pos,
+                );
+                destroyer_hull.push(InstanceData::new(tower_mat.to_cols_array_2d(), tower_d));
+                let stern = pos - Vec3::new(0.0, 0.0, len * 0.52);
                 let glow_mat = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(1.0 * fleet_scale, 0.5 * fleet_scale, 1.8 * fleet_scale),
+                    Vec3::new(1.0 * fleet_scale, 0.5 * fleet_scale, 2.0 * fleet_scale),
                     Quat::IDENTITY,
                     stern,
                 );
-                destroyer_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), engine_glow));
+                destroyer_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), engine_d));
             }
-            if !destroyer_rock.is_empty() {
-                state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.rock, &destroyer_rock);
+            if !destroyer_hull.is_empty() {
+                state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.cube, &destroyer_hull);
             }
             if !destroyer_glow.is_empty() {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.flash_mesh, &destroyer_glow);
             }
 
-            // Pass 0b3: Federation corvettes — smaller than destroyers, orbital patrol (realistic relative scale)
-            let mut corvette_rock: Vec<InstanceData> = Vec::new();
+            // Pass 0b3: Federation corvettes — angular hull + bridge + engine (Starship Troopers patrol)
+            let mut corvette_hull: Vec<InstanceData> = Vec::new();
             let mut corvette_glow: Vec<InstanceData> = Vec::new();
-            let corvette_hull = [0.10, 0.12, 0.16, 1.0];
-            let corvette_engine = [0.12, 0.28, 0.50, 0.5];
+            let corvette_hull_c = [0.16, 0.18, 0.24, 1.0];
+            let corvette_bridge_c = [0.20, 0.22, 0.28, 1.0];
+            let corvette_engine_c = [0.24, 0.48, 0.82, 0.6];
             for (i, &(radius, phase, speed)) in [
                 (120.0f32, 0.0, 0.18),
                 (180.0, 1.8, 0.14),
@@ -678,7 +849,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 (75.0, 0.7, 0.24),
                 (290.0, 4.8, 0.09),
             ].iter().enumerate() {
-                let base_len = 16.0 + (i as f32 * 0.17).sin() * 3.0; // ~16–19 units (smaller than destroyers)
+                let base_len = 16.0 + (i as f32 * 0.17).sin() * 3.0;
                 let scale_len = base_len * fleet_scale;
                 let angle = phase + ot * speed;
                 let pos = Vec3::new(
@@ -689,21 +860,28 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 let facing = Vec3::new(-angle.sin(), 0.0, angle.cos());
                 let rot = Quat::from_rotation_arc(Vec3::Z, facing);
                 let matrix = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.55 * fleet_scale, 0.28 * fleet_scale, scale_len),
+                    Vec3::new(0.5 * fleet_scale, 0.25 * fleet_scale, scale_len),
                     rot,
                     pos,
                 );
-                corvette_rock.push(InstanceData::new(matrix.to_cols_array_2d(), corvette_hull));
+                corvette_hull.push(InstanceData::new(matrix.to_cols_array_2d(), corvette_hull_c));
+                let bridge_pos = pos + facing * scale_len * 0.2 + Vec3::new(0.0, 0.5 * fleet_scale, 0.0);
+                let bridge_mat = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.35 * fleet_scale, 0.22 * fleet_scale, 0.8 * fleet_scale),
+                    rot,
+                    bridge_pos,
+                );
+                corvette_hull.push(InstanceData::new(bridge_mat.to_cols_array_2d(), corvette_bridge_c));
                 let stern = pos - facing * scale_len * 0.5;
                 let glow_mat = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.35 * fleet_scale, 0.2 * fleet_scale, 0.9 * fleet_scale),
+                    Vec3::new(0.38 * fleet_scale, 0.22 * fleet_scale, 1.0 * fleet_scale),
                     Quat::IDENTITY,
                     stern,
                 );
-                corvette_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), corvette_engine));
+                corvette_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), corvette_engine_c));
             }
-            if !corvette_rock.is_empty() {
-                state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.rock, &corvette_rock);
+            if !corvette_hull.is_empty() {
+                state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.cube, &corvette_hull);
             }
             if !corvette_glow.is_empty() {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.flash_mesh, &corvette_glow);
@@ -951,26 +1129,53 @@ pub fn run(state: &mut GameState) -> Result<()> {
             );
         }
 
-        // Pass 1a0: Squad drop pods descending from orbit — look up to see them coming from the fleet
+        // Pass 0c: Earth roads and walking paths (city layout — only when on Earth)
+        if let Some(ref roads_mesh) = state.earth_roads_mesh {
+            let asphalt = [0.20, 0.20, 0.22, 1.0];
+            let road_instance = InstanceData::new(glam::Mat4::IDENTITY.to_cols_array_2d(), asphalt);
+            state.renderer.render_instanced_load(&mut encoder, &scene_view, roads_mesh, &[road_instance]);
+        }
+
+        // Pass 1a0: Squad drop pods descending from orbit — pointed nose, body, heatshield base
         if state.current_planet_idx.is_some() && state.phase == GamePhase::Playing {
             if let Some(ref squad_drop) = state.squad_drop_pods {
                 let mut pod_rock: Vec<InstanceData> = Vec::new();
+                let mut pod_sphere: Vec<InstanceData> = Vec::new();
                 let mut pod_glow: Vec<InstanceData> = Vec::new();
                 for pod in squad_drop.pods_visible() {
                     let dist_sq = pod.position.distance_squared(cam_pos);
                     if dist_sq > 600.0 * 600.0 {
                         continue;
                     }
-                    let pod_color = [0.14, 0.15, 0.18, 1.0];
-                    let m = glam::Mat4::from_scale_rotation_translation(
-                        Vec3::new(0.5, 1.4, 0.5),
+                    let hull = [0.12, 0.13, 0.16, 1.0];
+                    let base = [0.18, 0.17, 0.15, 1.0]; // heatshield darker
+                    // Nose cone (pointed end, leading during descent)
+                    let nose_pos = pod.position + Vec3::Y * 0.9;
+                    let nose_m = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::splat(0.4),
+                        Quat::IDENTITY,
+                        nose_pos,
+                    );
+                    pod_sphere.push(InstanceData::new(nose_m.to_cols_array_2d(), hull));
+                    // Main body (capsule section)
+                    let body_m = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.38, 0.7, 0.38),
                         Quat::IDENTITY,
                         pod.position,
                     );
-                    pod_rock.push(InstanceData::new(m.to_cols_array_2d(), pod_color));
-                    let glow_pos = pod.position - Vec3::Y * 1.8;
+                    pod_rock.push(InstanceData::new(body_m.to_cols_array_2d(), hull));
+                    // Heatshield base (wider, flat disc under pod)
+                    let base_pos = pod.position - Vec3::Y * 0.85;
+                    let base_m = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.55, 0.15, 0.55),
+                        Quat::IDENTITY,
+                        base_pos,
+                    );
+                    pod_rock.push(InstanceData::new(base_m.to_cols_array_2d(), base));
+                    // Retro glow below
+                    let glow_pos = pod.position - Vec3::Y * 1.3;
                     let gm = glam::Mat4::from_scale_rotation_translation(
-                        Vec3::new(0.6, 0.4, 0.6),
+                        Vec3::new(0.5, 0.35, 0.5),
                         Quat::IDENTITY,
                         glow_pos,
                     );
@@ -978,6 +1183,9 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 }
                 if !pod_rock.is_empty() {
                     state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.rock, &pod_rock);
+                }
+                if !pod_sphere.is_empty() {
+                    state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.prop_sphere, &pod_sphere);
                 }
                 if !pod_glow.is_empty() {
                     state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.flash_mesh, &pod_glow);
@@ -1063,15 +1271,19 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 let sphere_y = pod_cam.y - pod.planet_visual_radius * 0.7 - 40.0;
                 let sphere_pos = Vec3::new(pod_cam.x, sphere_y, pod_cam.z + 10.0);
 
-                // Base planet color from current biome
-                let planet_color = match state.planet.primary_biome {
-                    BiomeType::Desert | BiomeType::Badlands => [0.7, 0.55, 0.3, 1.0],
-                    BiomeType::Volcanic | BiomeType::Ashlands => [0.35, 0.15, 0.08, 1.0],
-                    BiomeType::Frozen => [0.75, 0.82, 0.9, 1.0],
-                    BiomeType::Swamp | BiomeType::Jungle => [0.25, 0.4, 0.2, 1.0],
-                    BiomeType::Crystalline => [0.4, 0.25, 0.5, 1.0],
-                    BiomeType::Toxic | BiomeType::Wasteland => [0.35, 0.4, 0.2, 1.0],
-                    _ => [0.35, 0.45, 0.3, 1.0],
+                // Base planet color: Earth gets actual Earth colors (blue oceans) from space
+                let planet_color = if state.planet.name == "Earth" {
+                    [0.18, 0.42, 0.72, 1.0] // Earth blue (oceans)
+                } else {
+                    match state.planet.primary_biome {
+                        BiomeType::Desert | BiomeType::Badlands => [0.7, 0.55, 0.3, 1.0],
+                        BiomeType::Volcanic | BiomeType::Ashlands => [0.35, 0.15, 0.08, 1.0],
+                        BiomeType::Frozen => [0.75, 0.82, 0.9, 1.0],
+                        BiomeType::Swamp | BiomeType::Jungle => [0.25, 0.4, 0.2, 1.0],
+                        BiomeType::Crystalline => [0.4, 0.25, 0.5, 1.0],
+                        BiomeType::Toxic | BiomeType::Wasteland => [0.35, 0.4, 0.2, 1.0],
+                        _ => [0.35, 0.45, 0.3, 1.0],
+                    }
                 };
 
                 let radius = pod.planet_visual_radius;
@@ -1087,7 +1299,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     &inst,
                 );
 
-                // Atmosphere halo ring around the planet
+                // Atmosphere halo ring around the planet (Earth = blue glow, others = biome tint)
                 if pod.atmosphere_glow > 0.01 {
                     let halo_radius = radius * 1.08;
                     let glow = pod.atmosphere_glow;
@@ -1096,7 +1308,11 @@ pub fn run(state: &mut GameState) -> Result<()> {
                         Quat::from_rotation_x(0.3),
                         Vec3::new(sphere_pos.x, sphere_pos.y + radius * 0.6, sphere_pos.z),
                     );
-                    let halo_color = [0.4 * glow, 0.6 * glow, 1.5 * glow, glow * 0.5];
+                    let halo_color = if state.planet.name == "Earth" {
+                        [0.35 * glow, 0.55 * glow, 0.95 * glow, glow * 0.5] // Earth blue atmosphere
+                    } else {
+                        [0.4 * glow, 0.6 * glow, 1.5 * glow, glow * 0.5]
+                    };
                     let halo_inst = vec![InstanceData::new(halo_m.to_cols_array_2d(), halo_color)];
                     state.renderer.render_instanced_load(
                         &mut encoder, &scene_view,
@@ -1105,6 +1321,44 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     );
                 }
             }
+
+            // ── Drop pod hull (capsule + heatshield below camera so player sees "their" pod) ──
+            let pod_hull_color = [0.11, 0.12, 0.14, 1.0];
+            let heatshield_color = [0.16, 0.14, 0.12, 1.0];
+            let pod_bottom = pod_cam - Vec3::Y * 2.5;
+            let body_m = glam::Mat4::from_scale_rotation_translation(
+                Vec3::new(0.9, 1.2, 0.9),
+                Quat::IDENTITY,
+                pod_bottom + Vec3::Y * 0.6,
+            );
+            let pod_rock = vec![InstanceData::new(body_m.to_cols_array_2d(), pod_hull_color)];
+            state.renderer.render_instanced_load(
+                &mut encoder, &scene_view,
+                &state.environment_meshes.rock,
+                &pod_rock,
+            );
+            let shield_m = glam::Mat4::from_scale_rotation_translation(
+                Vec3::new(1.1, 0.25, 1.1),
+                Quat::IDENTITY,
+                pod_bottom - Vec3::Y * 0.4,
+            );
+            let shield_inst = vec![InstanceData::new(shield_m.to_cols_array_2d(), heatshield_color)];
+            state.renderer.render_instanced_load(
+                &mut encoder, &scene_view,
+                &state.environment_meshes.rock,
+                &shield_inst,
+            );
+            let nose_m = glam::Mat4::from_scale_rotation_translation(
+                Vec3::splat(0.55),
+                Quat::IDENTITY,
+                pod_cam + Vec3::Y * 0.8,
+            );
+            let nose_inst = vec![InstanceData::new(nose_m.to_cols_array_2d(), pod_hull_color)];
+            state.renderer.render_instanced_load(
+                &mut encoder, &scene_view,
+                &state.environment_meshes.prop_sphere,
+                &nose_inst,
+            );
 
             // ── Atmospheric entry plasma glow (hot shield below the pod) ──
             if pod.atmosphere_glow > 0.1 && pod.phase == DropPhase::AtmosphericEntry {
@@ -1247,6 +1501,10 @@ pub fn run(state: &mut GameState) -> Result<()> {
         // Mesh group 7: hazard (environmental hazards; use prop_sphere for disc/zone look)
         if !env_instances[MESH_GROUP_HAZARD as usize].is_empty() {
             state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.prop_sphere, &env_instances[MESH_GROUP_HAZARD as usize]);
+        }
+        // Mesh group 8: beveled cube (UCF Earth buildings — industrial chamfered look)
+        if !env_instances[MESH_GROUP_BEVELED_CUBE as usize].is_empty() {
+            state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.beveled_cube, &env_instances[MESH_GROUP_BEVELED_CUBE as usize]);
         }
         }
 
@@ -1421,6 +1679,39 @@ pub fn run(state: &mut GameState) -> Result<()> {
         }
         if !squad_sphere.is_empty() {
             state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.prop_sphere, &squad_sphere);
+        }
+
+        // Pass 2c: Earth settlement citizens (Starship Troopers aesthetic — civilian head + torso)
+        let mut citizen_rock: Vec<InstanceData> = Vec::new();
+        let mut citizen_sphere: Vec<InstanceData> = Vec::new();
+        for (_, (transform, citizen)) in state.world.query::<(&Transform, &Citizen)>().iter() {
+            let dist_sq = transform.position.distance_squared(cam_pos);
+            if dist_sq < VIEWMODEL_CULL_SQ || dist_sq > BUG_RENDER_DIST_SQ {
+                continue;
+            }
+            // Civilian colors: tan, gray, brown (Federation colony)
+            let head_color = [0.52, 0.42, 0.35, 1.0];
+            let torso_color = [0.38, 0.35, 0.32, 1.0];
+            let head_pos = transform.position + transform.rotation * Vec3::new(0.0, 1.4, 0.0);
+            let torso_pos = transform.position + transform.rotation * Vec3::new(0.0, 0.85, 0.0);
+            let head_m = glam::Mat4::from_scale_rotation_translation(
+                Vec3::splat(0.2),
+                transform.rotation,
+                head_pos,
+            );
+            let torso_m = glam::Mat4::from_scale_rotation_translation(
+                Vec3::new(0.24, 0.38, 0.12),
+                transform.rotation,
+                torso_pos,
+            );
+            citizen_sphere.push(InstanceData::new(head_m.to_cols_array_2d(), head_color));
+            citizen_rock.push(InstanceData::new(torso_m.to_cols_array_2d(), torso_color));
+        }
+        if !citizen_rock.is_empty() {
+            state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.rock, &citizen_rock);
+        }
+        if !citizen_sphere.is_empty() {
+            state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.prop_sphere, &citizen_sphere);
         }
 
         // Pass 3: Gore splatters
