@@ -197,7 +197,7 @@ impl Planet {
     }
 
     /// Generate planet name (Heinlein / Federation / Helldivers 2 style).
-    fn generate_name(seed: u64, classification: PlanetClassification, rng: &mut StdRng) -> String {
+    fn generate_name(_seed: u64, classification: PlanetClassification, rng: &mut StdRng) -> String {
         let (prefixes, suffixes) = match classification {
             PlanetClassification::HiveWorld => (
                 vec![

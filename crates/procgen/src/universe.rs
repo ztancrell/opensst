@@ -154,3 +154,34 @@ fn generate_system_name(seed: u64) -> String {
 
     name
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn universe_generate_deterministic_system_count() {
+        let u1 = Universe::generate(12345, 50);
+        let u2 = Universe::generate(12345, 50);
+        assert_eq!(u1.systems.len(), 50);
+        assert_eq!(u2.systems.len(), 50);
+    }
+
+    #[test]
+    fn universe_generate_same_seed_same_first_system_name() {
+        let u1 = Universe::generate(999, 10);
+        let u2 = Universe::generate(999, 10);
+        assert_eq!(u1.systems[0].name, u2.systems[0].name);
+        assert_eq!(u1.systems[0].seed, u2.systems[0].seed);
+    }
+
+    #[test]
+    fn universe_different_seed_different_names() {
+        let u1 = Universe::generate(1, 5);
+        let u2 = Universe::generate(2, 5);
+        // At least one system name should differ (extremely likely)
+        let names1: Vec<_> = u1.systems.iter().map(|s| s.name.as_str()).collect();
+        let names2: Vec<_> = u2.systems.iter().map(|s| s.name.as_str()).collect();
+        assert_ne!(names1, names2);
+    }
+}

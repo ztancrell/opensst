@@ -38,24 +38,6 @@ Open Starship Troopers — a fast, realistic Starship Troopers-inspired first-pe
 - **Particle shader** for explosions, debris, muzzle flash
 - **Procedural sky** with dual suns and atmospheric scattering
 
-### FPS Gameplay (Starship Troopers: Extermination Style)
-
-#### Player Classes
-| Class | Specialty | Ability |
-|-------|-----------|---------|
-| **Hunter** | Assault | Jetpack Burst - Launch forward |
-| **Bastion** | Defense | Deploy Barricade - Cover construction |
-| **Operator** | Support | Ammo Station - Resupply allies |
-| **Ranger** | Recon | Scan Pulse - Reveal enemies |
-| **Guardian** | Tank | Shield Dome - Area protection |
-
-#### Weapons
-- **Morita Rifle** - Standard assault rifle, reliable and accurate
-- **Trench Shotgun** - High damage at close range, 8 pellets per shot
-- **MK-55 Tactical** - Burst fire machine gun
-- **Hawkeye DMR** - Designated marksman rifle, high accuracy
-- **Morita SAW** - Squad automatic weapon, large magazine
-
 #### Combat Features
 - **Hit markers** with headshot and kill indicators
 - **Floating damage numbers** for visual feedback
@@ -195,7 +177,7 @@ All bugs are rendered with GPU instancing for maximum performance:
 - [ ] Additional weapons (grenades, melee)
 - [ ] Vehicle support
 - [ ] Procedural mission generation
-- [ ] Save/load system
+- [x] Save/load system (see Saves section)
 
 ## Credits
 

@@ -229,7 +229,7 @@ pub struct PlanetBiomes {
     /// The biome types present on this planet (2-4 types).
     pub biomes: Vec<BiomeType>,
     biome_noise: Perlin,
-    blend_noise: Simplex,
+    _blend_noise: Simplex,
     /// Scale: lower = larger biome regions.
     pub region_scale: f64,
 }
@@ -256,7 +256,7 @@ impl PlanetBiomes {
         Self {
             biomes,
             biome_noise,
-            blend_noise,
+            _blend_noise: blend_noise,
             region_scale: 0.004 + rng.gen::<f64>() * 0.003, // 0.004..0.007
         }
     }

@@ -183,7 +183,7 @@ pub struct CollisionCapsule {
 
 /// Procedural bug mesh generator
 pub struct BugMeshGenerator {
-    rng: StdRng,
+    _rng: StdRng,
     config: BugConfig,
     vertices: Vec<BugVertex>,
     indices: Vec<u32>,
@@ -194,7 +194,7 @@ pub struct BugMeshGenerator {
 impl BugMeshGenerator {
     pub fn new(config: BugConfig) -> Self {
         Self {
-            rng: StdRng::seed_from_u64(config.seed),
+            _rng: StdRng::seed_from_u64(config.seed),
             config,
             vertices: Vec::new(),
             indices: Vec::new(),
@@ -573,9 +573,9 @@ impl BugMeshGenerator {
         // Leg segment dimensions
         let coxa_length = 0.15;
         let coxa_radius = 0.06;
-        let femur_length = 0.35;
+        let _femur_length = 0.35;
         let femur_radius = 0.04;
-        let tibia_length = 0.4;
+        let _tibia_length = 0.4;
         let tibia_radius = 0.03;
 
         // Generate coxa (hip joint)
@@ -674,7 +674,7 @@ impl BugMeshGenerator {
 
     fn add_claw(&mut self, base: Vec3, side: f32, bone: u32) {
         // Simple pointed claw
-        let claw_length = 0.1;
+        let _claw_length = 0.1;
         let claw_tip = base + Vec3::new(side * 0.02, -0.08, 0.05);
 
         let start_idx = self.vertices.len() as u32;

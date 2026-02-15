@@ -99,8 +99,8 @@ pub struct PBRTextureSet {
 /// Procedural texture generator
 pub struct TextureGenerator {
     perlin: Perlin,
-    simplex: Simplex,
-    rng: StdRng,
+    _simplex: Simplex,
+    _rng: StdRng,
 }
 
 impl TextureGenerator {
@@ -108,8 +108,8 @@ impl TextureGenerator {
         let mut rng = StdRng::seed_from_u64(seed);
         Self {
             perlin: Perlin::new(rng.gen()),
-            simplex: Simplex::new(rng.gen()),
-            rng,
+            _simplex: Simplex::new(rng.gen()),
+            _rng: rng,
         }
     }
 
@@ -231,7 +231,7 @@ impl TextureGenerator {
                 // Cracks in rock areas
                 if rock_blend > 0.5 {
                     let crack = self.crack_pattern(u * 20.0, v * 20.0);
-                    color *= (1.0 - crack as f32 * 0.3 * rock_blend as f32);
+                    color *= 1.0 - crack as f32 * 0.3 * rock_blend as f32;
                 }
 
                 albedo.set_pixel(x, y, Pixel::from_rgb(color.x, color.y, color.z));

@@ -4,9 +4,9 @@ use anyhow::Result;
 use wgpu::util::DeviceExt;
 
 /// A GPU texture with its view and sampler.
+/// The texture is held so the view remains valid; use `view` and `sampler` for binding.
 pub struct Texture {
-    #[allow(dead_code)]
-    pub texture: wgpu::Texture,
+    _texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
 }
@@ -51,7 +51,7 @@ impl Texture {
             ..Default::default()
         });
 
-        Self { texture, view, sampler }
+        Self { _texture: texture, view, sampler }
     }
 
     /// Load a texture from bytes (PNG/JPEG).
@@ -109,7 +109,7 @@ impl Texture {
             ..Default::default()
         });
 
-        Ok(Self { texture, view, sampler })
+        Ok(Self { _texture: texture, view, sampler })
     }
 
     /// Create a simple 1x1 white texture (placeholder).
@@ -144,7 +144,7 @@ impl Texture {
             ..Default::default()
         });
 
-        Self { texture, view, sampler }
+        Self { _texture: texture, view, sampler }
     }
 
     pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;

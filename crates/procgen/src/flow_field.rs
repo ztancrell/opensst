@@ -304,3 +304,45 @@ impl FlowField {
         self.goal
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_field_new_dimensions() {
+        let f = FlowField::new(20, 30, 2.0, Vec2::new(-10.0, -15.0));
+        assert_eq!(f.width, 20);
+        assert_eq!(f.height, 30);
+        assert_eq!(f.cell_size, 2.0);
+        assert_eq!(f.origin, Vec2::new(-10.0, -15.0));
+    }
+
+    #[test]
+    fn flow_field_set_goal_updates_origin() {
+        let mut f = FlowField::new(10, 10, 2.0, Vec2::ZERO);
+        f.set_goal(Vec3::new(100.0, 0.0, 50.0));
+        assert!(f.goal().is_some());
+        // Origin should be centered on goal (half_w = 10, half_h = 10)
+        assert!((f.origin.x - 90.0).abs() < 1.0);
+        assert!((f.origin.y - 40.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn flow_field_world_to_grid_roundtrip() {
+        let f = FlowField::new(10, 10, 2.0, Vec2::new(0.0, 0.0));
+        let world = Vec3::new(5.0, 0.0, 7.0);
+        let grid = f.world_to_grid(world);
+        let back = f.grid_to_world(grid);
+        assert!((back.x - 5.0).abs() < 2.0);
+        assert!((back.z - 7.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn flow_field_set_blocked_is_walkable() {
+        let mut f = FlowField::new(8, 8, 1.0, Vec2::ZERO);
+        assert!(f.is_walkable(4, 4));
+        f.set_blocked(4, 4);
+        assert!(!f.is_walkable(4, 4));
+    }
+}

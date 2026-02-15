@@ -5678,7 +5678,14 @@ impl ApplicationHandler for App {
                 .with_title("OpenSST - Starship Troopers FPS [Euphoria Physics]")
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
-            let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
+            let window = match event_loop.create_window(window_attrs) {
+                Ok(w) => Arc::new(w),
+                Err(e) => {
+                    log::error!("Failed to create window: {}", e);
+                    event_loop.exit();
+                    return;
+                }
+            };
 
             let state = pollster::block_on(GameState::new(window.clone()));
             match state {
