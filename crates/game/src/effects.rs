@@ -29,10 +29,12 @@ impl AmbientDust {
         Self { particles: Vec::new(), spawn_timer: 0.0 }
     }
 
-    pub fn update(&mut self, dt: f32, cam_pos: Vec3) {
+    /// density_mult: 1.0 = normal; higher when cloudy/rain for more visible floating particles
+    pub fn update(&mut self, dt: f32, cam_pos: Vec3, density_mult: f32) {
         self.spawn_timer += dt;
-        // Spawn a few particles per frame
-        if self.spawn_timer > 0.05 && self.particles.len() < 150 {
+        let max_particles = (150.0 * density_mult.min(2.5)) as usize;
+        let spawn_interval = 0.05 / density_mult.max(0.5);
+        if self.spawn_timer > spawn_interval && self.particles.len() < max_particles {
             self.spawn_timer = 0.0;
             let px = cam_pos.x + (rand::random::<f32>() - 0.5) * 30.0;
             let py = cam_pos.y + (rand::random::<f32>() - 0.3) * 10.0;
@@ -74,6 +76,14 @@ pub struct RainDrop {
     pub position: Vec3,
     pub velocity: Vec3,
     pub life: f32,
+}
+
+/// Snow particle: slower fall, slight drift, for Snow weather.
+pub struct SnowParticle {
+    pub position: Vec3,
+    pub velocity: Vec3,
+    pub life: f32,
+    pub size: f32,
 }
 
 /// Visual-only bullet tracer for first-person feedback

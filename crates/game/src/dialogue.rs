@@ -92,6 +92,72 @@ pub fn dialogue_content(dialogue_id: usize) -> Vec<DialogueNode> {
                 choices: vec![("Goodbye.".to_string(), None)],
             },
         ],
+        // 5–9: Roger Young crew (Fleet, FleetOfficer, MobileInfantry, Marauder, Johnny Rico)
+        5 => vec![
+            DialogueNode {
+                text: "Ship's running smooth. War table's that way if you're dropping.".to_string(),
+                choices: vec![
+                    ("What's our status?".to_string(), Some(1)),
+                    ("Carry on.".to_string(), None),
+                ],
+            },
+            DialogueNode {
+                text: "All systems nominal. Pick a planet, get your mission, and head to the bay.".to_string(),
+                choices: vec![("Thanks.".to_string(), None)],
+            },
+        ],
+        6 => vec![
+            DialogueNode {
+                text: "We hold the line so you can drop. Don't make our job harder.".to_string(),
+                choices: vec![
+                    ("What's the word from Fleet?".to_string(), Some(1)),
+                    ("Understood. Good hunting.".to_string(), None),
+                ],
+            },
+            DialogueNode {
+                text: "Same as always: kill bugs, hold ground, extract when you're done.".to_string(),
+                choices: vec![("Goodbye.".to_string(), None)],
+            },
+        ],
+        7 => vec![
+            DialogueNode {
+                text: "Ready to drop, trooper? War table's where you pick the mission.".to_string(),
+                choices: vec![
+                    ("Would you like to know more?".to_string(), Some(1)),
+                    ("See you on the surface.".to_string(), None),
+                ],
+            },
+            DialogueNode {
+                text: "I'm from Buenos Aires, and I say kill 'em all!".to_string(),
+                choices: vec![("Goodbye.".to_string(), None)],
+            },
+        ],
+        8 => vec![
+            DialogueNode {
+                text: "Marauder squad's on standby. You need fire support, we're there.".to_string(),
+                choices: vec![
+                    ("What's the loadout?".to_string(), Some(1)),
+                    ("Good to know. Thanks.".to_string(), None),
+                ],
+            },
+            DialogueNode {
+                text: "Heavy armor, heavy guns. We punch holes; you fill 'em.".to_string(),
+                choices: vec![("Goodbye.".to_string(), None)],
+            },
+        ],
+        9 => vec![
+            DialogueNode {
+                text: "Rico. Pick your planet and mission at the war table. Drop bay's aft.".to_string(),
+                choices: vec![
+                    ("What's our priority?".to_string(), Some(1)),
+                    ("We'll get it done.".to_string(), None),
+                ],
+            },
+            DialogueNode {
+                text: "Same as always: protect the Federation. Now move out.".to_string(),
+                choices: vec![("Goodbye.".to_string(), None)],
+            },
+        ],
         _ => vec![DialogueNode {
             text: "Citizen. Good day.".to_string(),
             choices: vec![("Goodbye.".to_string(), None)],
@@ -105,7 +171,8 @@ pub fn dialogue_content(dialogue_id: usize) -> Vec<DialogueNode> {
 pub enum DialogueState {
     Closed,
     Open {
-        speaker_entity: Entity,
+        /// None when talking to a ship NPC (Roger Young crew); Some when talking to an Earth citizen.
+        speaker_entity: Option<Entity>,
         speaker_name: String,
         dialogue_id: usize,
         node_index: usize,

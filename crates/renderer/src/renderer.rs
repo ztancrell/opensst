@@ -12,13 +12,17 @@ use crate::{
         create_celestial_pipeline,
         create_cinematic_bind_group_layout,
         create_cinematic_pipeline,
+        create_main_shadow_pipeline,
         create_overlay_bind_group_layout,
         create_overlay_pipeline,
         create_render_pipeline,
+        create_shadow_bind_group_layout,
+        create_shadow_pass_bind_group_layout,
         create_sky_bind_group_layout,
         create_sky_pipeline,
         create_terrain_bind_group_layout,
         create_terrain_pipeline,
+        create_terrain_shadow_pipeline,
         create_water_pipeline,
         create_texture_bind_group_layout,
         create_viewmodel_pipeline,
@@ -47,6 +51,8 @@ pub struct TerrainUniform {
     pub fog_params: [f32; 4],
     /// x = deform_origin_x, y = deform_origin_z, z = deform_half_size, w = deform_enabled (0 or 1)
     pub deform_params: [f32; 4],
+    /// x = snow_enabled (0 or 1), yzw unused
+    pub snow_params: [f32; 4],
 }
 
 impl Default for TerrainUniform {
@@ -62,6 +68,7 @@ impl Default for TerrainUniform {
             sun_direction: [0.5, 1.0, 0.3, 0.0],
             fog_params: [0.0003, 0.05, 50.0, 400.0], // density, height_falloff, start, end
             deform_params: [0.0, 0.0, DEFORM_HALF_SIZE, 0.0], // origin_x, origin_z, half_size, enabled
+            snow_params: [0.0, 0.0, 0.0, 0.0], // x = snow_enabled
         }
     }
 }
@@ -91,6 +98,16 @@ impl Default for SkyUniform {
     }
 }
 
+/// Shadow map uniform (must match shadow.wgsl ShadowUniform). Used for depth pass and for sampling.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct ShadowUniform {
+    pub light_view_proj: [[f32; 4]; 4],
+    pub camera_pos: [f32; 3],
+    pub planet_radius: f32,
+    pub _pad: [f32; 4],
+}
+
 /// Main renderer state.
 pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
@@ -114,6 +131,8 @@ pub struct Renderer {
     /// Heightfield for terrain deformation (footprints in snow/sand). R32Float, 256x256.
     deform_texture: wgpu::Texture,
     deform_sampler: wgpu::Sampler,
+    /// Snow accumulation heightfield (weather-driven). R32Float, 256x256.
+    snow_texture: wgpu::Texture,
     sky_bind_group: wgpu::BindGroup,
     sky_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -122,6 +141,16 @@ pub struct Renderer {
 
     texture_bind_group_layout: wgpu::BindGroupLayout,
     default_texture_bind_group: wgpu::BindGroup,
+
+    // Shadow mapping (directional sun shadow)
+    shadow_map_texture: wgpu::Texture,
+    shadow_map_view: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    shadow_buffer: wgpu::Buffer,
+    shadow_pass_bind_group: wgpu::BindGroup,
+    shadow_bind_group: wgpu::BindGroup,
+    terrain_shadow_pipeline: wgpu::RenderPipeline,
+    main_shadow_pipeline: wgpu::RenderPipeline,
 
     // Depth buffer
     depth_texture: Texture,
@@ -174,9 +203,9 @@ impl Renderer {
     pub async fn new(window: Arc<Window>) -> Result<Self> {
         let size = window.inner_size();
 
-        // Create wgpu instance
+        // Create wgpu instance: Vulkan/DX12 on Windows/Linux, Metal on macOS (native; no MoltenVK needed)
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12,
+            backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
@@ -278,12 +307,66 @@ impl Renderer {
             ],
         });
 
+        // Shadow mapping: directional sun shadow map (2048x2048 depth)
+        const SHADOW_MAP_SIZE: u32 = 2048;
+        let shadow_pass_layout = create_shadow_pass_bind_group_layout(&device);
+        let shadow_sample_layout = create_shadow_bind_group_layout(&device);
+        let shadow_uniform = ShadowUniform {
+            light_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            camera_pos: [0.0, 0.0, 0.0],
+            planet_radius: 0.0,
+            _pad: [0.0; 4],
+        };
+        let shadow_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Shadow Uniform"),
+            contents: bytemuck::cast_slice(&[shadow_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let shadow_map_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow Map"),
+            size: wgpu::Extent3d { width: SHADOW_MAP_SIZE, height: SHADOW_MAP_SIZE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Texture::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_map_view = shadow_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let shadow_pass_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shadow Pass Bind Group"),
+            layout: &shadow_pass_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() }],
+        });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shadow Bind Group"),
+            layout: &shadow_sample_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_map_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+            ],
+        });
+        let terrain_shadow_pipeline = create_terrain_shadow_pipeline(&device, &shadow_pass_layout);
+        let main_shadow_pipeline = create_main_shadow_pipeline(&device, &shadow_pass_layout);
+
         // Create render pipeline
         let render_pipeline = create_render_pipeline(
             &device,
             &config,
             &camera_bind_group_layout,
             &texture_bind_group_layout,
+            &shadow_sample_layout,
         );
 
         // Terrain pipeline (camera + terrain uniform in one bind group)
@@ -325,6 +408,27 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        // Snow accumulation heightfield (same size/format as deform; weather-driven knee-deep snow)
+        let snow_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Terrain Snow"),
+                size: wgpu::Extent3d {
+                    width: deform_size,
+                    height: deform_size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&deform_pixels),
+        );
+        let snow_view = snow_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let terrain_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Terrain Bind Group"),
             layout: &terrain_bind_group_layout,
@@ -345,9 +449,17 @@ impl Renderer {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&deform_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&snow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&deform_sampler),
+                },
             ],
         });
-        let terrain_pipeline = create_terrain_pipeline(&device, &config, &terrain_bind_group_layout);
+        let terrain_pipeline = create_terrain_pipeline(&device, &config, &terrain_bind_group_layout, &shadow_sample_layout);
         let water_pipeline = create_water_pipeline(&device, &config, &terrain_bind_group_layout);
 
         let sky_bind_group_layout = create_sky_bind_group_layout(&device);
@@ -374,7 +486,7 @@ impl Renderer {
         let sky_pipeline = create_sky_pipeline(&device, &config, &sky_bind_group_layout);
 
         let viewmodel_pipeline =
-            create_viewmodel_pipeline(&device, &config, &camera_bind_group_layout, &texture_bind_group_layout);
+            create_viewmodel_pipeline(&device, &config, &camera_bind_group_layout, &texture_bind_group_layout, &shadow_sample_layout);
 
         // Create depth texture
         let depth_texture = Texture::create_depth_texture(&device, config.width, config.height, "Depth Texture");
@@ -571,12 +683,21 @@ impl Renderer {
             terrain_buffer,
             deform_texture,
             deform_sampler,
+            snow_texture,
             sky_bind_group,
             sky_buffer,
             camera_buffer,
             camera_uniform,
             texture_bind_group_layout,
             default_texture_bind_group,
+            shadow_map_texture,
+            shadow_map_view,
+            shadow_sampler,
+            shadow_buffer,
+            shadow_pass_bind_group,
+            shadow_bind_group,
+            terrain_shadow_pipeline,
+            main_shadow_pipeline,
             depth_texture,
             instance_buffer,
             max_instances,
@@ -604,6 +725,85 @@ impl Renderer {
             blur_uniform_v,
             depth_sampler_linear,
         })
+    }
+
+    /// Update shadow light view-proj and camera/planet for curvature. Call before shadow pass and before main scene.
+    pub fn update_shadow_light(
+        &mut self,
+        sun_dir: [f32; 3],
+        camera_pos: [f32; 3],
+        planet_radius: f32,
+    ) {
+        let sun = glam::Vec3::from_array(sun_dir);
+        let cam = glam::Vec3::from_array(camera_pos);
+        let dist = 120.0;
+        let light_eye = cam + sun * dist;
+        let light_target = cam;
+        let up = if sun.y.abs() > 0.99 { glam::Vec3::Z } else { glam::Vec3::Y };
+        let view = glam::Mat4::look_at_rh(light_eye, light_target, up);
+        let half = 70.0f32;
+        let proj = glam::Mat4::orthographic_rh(-half, half, -half, half, 10.0, 280.0);
+        let light_view_proj = proj * view;
+        let u = ShadowUniform {
+            light_view_proj: light_view_proj.to_cols_array_2d(),
+            camera_pos,
+            planet_radius,
+            _pad: [0.0; 4],
+        };
+        self.queue.write_buffer(&self.shadow_buffer, 0, bytemuck::cast_slice(&[u]));
+    }
+
+    /// Run shadow pass: clear shadow map, set bind group, then run the closure to draw terrain and instanced geometry.
+    pub fn with_shadow_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        f: impl FnOnce(&Self, &mut wgpu::RenderPass),
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Shadow Pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.shadow_map_view,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_bind_group(0, &self.shadow_pass_bind_group, &[]);
+        f(self, &mut pass);
+    }
+
+    /// Draw one terrain chunk into the shadow map. Call after begin_shadow_pass; use terrain_shadow_pipeline.
+    pub fn render_terrain_shadow(
+        &self,
+        pass: &mut wgpu::RenderPass,
+        mesh: &Mesh,
+    ) {
+        pass.set_pipeline(&self.terrain_shadow_pipeline);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+    }
+
+    /// Draw instanced geometry into the shadow map. Call after begin_shadow_pass; use main_shadow_pipeline.
+    pub fn render_shadow_instanced(
+        &self,
+        pass: &mut wgpu::RenderPass,
+        mesh: &Mesh,
+        instances: &[InstanceData],
+        base_offset: u32,
+    ) {
+        if instances.is_empty() {
+            return;
+        }
+        let offset = base_offset as usize * std::mem::size_of::<InstanceData>();
+        self.queue.write_buffer(&self.instance_buffer, offset as u64, bytemuck::cast_slice(instances));
+        pass.set_pipeline(&self.main_shadow_pipeline);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, self.instance_buffer.slice(offset as u64..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.num_indices, 0, base_offset..(base_offset + instances.len() as u32));
     }
 
     /// Handle window resize.
@@ -930,6 +1130,7 @@ impl Renderer {
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_bind_group(1, &self.default_texture_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.shadow_bind_group, &[]);
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -987,6 +1188,7 @@ impl Renderer {
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_bind_group(1, &self.default_texture_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.shadow_bind_group, &[]);
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -1044,13 +1246,14 @@ impl Renderer {
         render_pass.set_pipeline(&self.viewmodel_pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_bind_group(1, &self.default_texture_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.shadow_bind_group, &[]);
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..mesh.num_indices, 0, offset..(offset + instance_count as u32));
     }
 
-    /// Update terrain uniform (sun, fog, biome colors, time, planet radius, chunk_size, deformation).
+    /// Update terrain uniform (sun, fog, biome colors, time, planet radius, chunk_size, deformation, snow).
     /// Call before render_terrain. Deform origin is world (x,z) center of the deformation texture.
     pub fn update_terrain(
         &mut self,
@@ -1063,6 +1266,7 @@ impl Renderer {
         deform_origin_x: f32,
         deform_origin_z: f32,
         deform_enabled: bool,
+        snow_enabled: bool,
     ) {
         let mut uniform = TerrainUniform::default();
         uniform.biome_params[0] = chunk_size;    // x = chunk_size (for edge blending)
@@ -1076,6 +1280,7 @@ impl Renderer {
         uniform.deform_params[1] = deform_origin_z;
         uniform.deform_params[2] = DEFORM_HALF_SIZE;
         uniform.deform_params[3] = if deform_enabled { 1.0 } else { 0.0 };
+        uniform.snow_params[0] = if snow_enabled { 1.0 } else { 0.0 };
         self.queue
             .write_buffer(&self.terrain_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -1104,6 +1309,30 @@ impl Renderer {
         );
     }
 
+    /// Upload snow accumulation heightfield (256x256 f32s). Call when snow is enabled.
+    pub fn upload_terrain_snow(&mut self, data: &[f32]) {
+        debug_assert_eq!(data.len(), (DEFORM_TEXTURE_SIZE * DEFORM_TEXTURE_SIZE) as usize);
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.snow_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(data),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(DEFORM_TEXTURE_SIZE * 4),
+                rows_per_image: Some(DEFORM_TEXTURE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: DEFORM_TEXTURE_SIZE,
+                height: DEFORM_TEXTURE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     /// Update sky uniform for dynamic time of day and weather. Call before render_sky.
     /// `time_of_day`: 0 = dawn, 0.25 = noon, 0.5 = dusk, 0.75 = midnight.
     /// `sun_dir`: pre-computed sun direction (from game sky_weather_params).
@@ -1111,7 +1340,8 @@ impl Renderer {
     /// `planet_type`: 0 = normal, 1 = toxic (second sun).
     /// `planet_radius`: conceptual planet sphere radius (for space rendering).
     /// `atmo_height`: atmosphere thickness above surface.
-    /// `planet_surface_color`: average biome color for the planet sphere from orbit.
+    /// `planet_surface_color`: average biome color (orbit, drop, surface — single source).
+    /// `atmosphere_color`: planet atmosphere tint for zenith/horizon (same in orbit, drop, surface).
     pub fn update_sky(
         &mut self,
         time_of_day: f32,
@@ -1122,6 +1352,7 @@ impl Renderer {
         planet_radius: f32,
         atmo_height: f32,
         planet_surface_color: [f32; 3],
+        atmosphere_color: [f32; 3],
     ) {
         let t = time_of_day;
 
@@ -1154,10 +1385,10 @@ impl Renderer {
         let dusk_horizon  = [0.98, 0.30, 0.08]; // intense red-orange
         let dusk_ground   = [0.25, 0.12, 0.05];
 
-        // Night: very dark with warm undertone (SST populated galaxy)
-        let night_zenith  = [0.02, 0.015, 0.035];
-        let night_horizon = [0.04, 0.03, 0.05];
-        let night_ground  = [0.03, 0.025, 0.03];
+        // Night: properly dark so night feels like night
+        let night_zenith  = [0.008, 0.006, 0.018];
+        let night_horizon = [0.018, 0.014, 0.025];
+        let night_ground  = [0.012, 0.010, 0.015];
 
         // Blend between keyframes based on time_of_day
         // t: 0.0=dawn, 0.25=noon, 0.50=dusk, 0.75=night
@@ -1191,8 +1422,9 @@ impl Renderer {
         let overcast_dim = 1.0 - cloud_density * 0.45;
         let zenith = [zenith[0] * overcast_dim, zenith[1] * overcast_dim, zenith[2] * overcast_dim];
 
-        // Sun intensity: bright during day, fading at dawn/dusk, zero at night
-        let sun_intensity = sun_dir[1].max(0.0).powf(0.3) * (1.0 - cloud_density * 0.7);
+        // Sun intensity: bright during day, fading at dawn/dusk, zero when sun below horizon
+        let sun_elev = sun_dir[1].max(0.0);
+        let sun_intensity = sun_elev.powf(0.35) * (1.0 - cloud_density * 0.7);
 
         // Sun color: warm at low elevation, white at high elevation
         let sun_warmth = (1.0 - sun_dir[1].max(0.0)).powf(0.5);
@@ -1207,11 +1439,24 @@ impl Renderer {
             ground[2] * 0.3 + planet_surface_color[2] * 0.7,
         ];
 
+        // Zenith and horizon tinted by planet atmosphere so drop/surface match orbit
+        let atmo_k = 0.35;
+        let zenith_tinted = [
+            zenith[0] * (1.0 - atmo_k) + atmosphere_color[0] * atmo_k,
+            zenith[1] * (1.0 - atmo_k) + atmosphere_color[1] * atmo_k,
+            zenith[2] * (1.0 - atmo_k) + atmosphere_color[2] * atmo_k,
+        ];
+        let horizon_tinted = [
+            horizon[0] * (1.0 - atmo_k) + atmosphere_color[0] * atmo_k,
+            horizon[1] * (1.0 - atmo_k) + atmosphere_color[1] * atmo_k,
+            horizon[2] * (1.0 - atmo_k) + atmosphere_color[2] * atmo_k,
+        ];
+
         let mut u = SkyUniform::default();
         u.sun_direction = [sun_dir[0], sun_dir[1], sun_dir[2], sun_intensity];
         u.sun_color = [sun_r, sun_g, sun_b, 0.02]; // w = disk size
-        u.sky_color_zenith = [zenith[0], zenith[1], zenith[2], planet_radius];  // w = planet radius
-        u.sky_color_horizon = [horizon[0], horizon[1], horizon[2], atmo_height]; // w = atmo height
+        u.sky_color_zenith = [zenith_tinted[0], zenith_tinted[1], zenith_tinted[2], planet_radius];  // w = planet radius
+        u.sky_color_horizon = [horizon_tinted[0], horizon_tinted[1], horizon_tinted[2], atmo_height]; // w = atmo height
         u.ground_color = [ground_final[0], ground_final[1], ground_final[2], dust_amount];
         u.params[0] = time_of_day * 100.0;
         u.params[1] = cloud_density;
@@ -1343,6 +1588,7 @@ impl Renderer {
 
         render_pass.set_pipeline(&self.terrain_pipeline);
         render_pass.set_bind_group(0, &self.terrain_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.shadow_bind_group, &[]);
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..mesh.num_indices, 0, 0..1);

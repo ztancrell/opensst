@@ -239,6 +239,38 @@ pub const FEDERATION_TERRITORY: &[Place] = &[
     },
 ];
 
+/// Axis-aligned bounds of the full territory (all places + margin). Used to ensure chunks are loaded before building.
+pub fn territory_bounds() -> (f32, f32, f32, f32) {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for place in FEDERATION_TERRITORY {
+        min_x = min_x.min(place.center_x - place.radius);
+        max_x = max_x.max(place.center_x + place.radius);
+        min_z = min_z.min(place.center_z - place.radius);
+        max_z = max_z.max(place.center_z + place.radius);
+    }
+    // Include road endpoints (polylines) so roads don't sample unloaded chunks
+    for poly in road_polylines() {
+        for &(x, z) in &poly {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_z = min_z.min(z);
+            max_z = max_z.max(z);
+        }
+    }
+    for poly in path_polylines() {
+        for &(x, z) in &poly {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_z = min_z.min(z);
+            max_z = max_z.max(z);
+        }
+    }
+    (min_x, max_x, min_z, max_z)
+}
+
 /// Build flat list of all waypoints in world space (for citizen pathfinding).
 /// Order: all waypoints from place 0, then place 1, etc. Indices match citizen logic.
 pub fn all_waypoints_global() -> Vec<(f32, f32)> {
@@ -315,7 +347,7 @@ pub fn road_collider_segments() -> Vec<(f32, f32, f32, f32, f32)> {
     out
 }
 
-/// If (x, z) is inside any road/path segment, returns the ground Y at that segment (for solid road feel).
+/// If (x, z) is inside any road/path segment, returns the ground Y at that position (for solid road feel).
 pub fn road_ground_y_at<F: Fn(f32, f32) -> f32>(x: f32, z: f32, sample_terrain_y: F) -> Option<f32> {
     for (cx, cz, half_len, half_w, rot) in road_collider_segments() {
         let c = rot.cos();
@@ -325,7 +357,7 @@ pub fn road_ground_y_at<F: Fn(f32, f32) -> f32>(x: f32, z: f32, sample_terrain_y
         let local_along = rel_x * s + rel_z * c;
         let local_across = -rel_x * c + rel_z * s;
         if local_along.abs() <= half_len && local_across.abs() <= half_w {
-            return Some(sample_terrain_y(cx, cz));
+            return Some(sample_terrain_y(x, z));
         }
     }
     None
@@ -406,11 +438,23 @@ fn add_strip<F: Fn(f32, f32) -> f32>(
         let y2 = sample_terrain_y(bx_r, bz_r) + 0.02;
         let y3 = sample_terrain_y(bx_l, bz_l) + 0.02;
 
+        // Use actual quad normal so lighting is correct on slopes (avoids black/dark patches from (0,1,0)).
+        let v0 = [ax_l, y0, az_l];
+        let v1 = [ax_r, y1, az_r];
+        let v3 = [bx_l, y3, bz_l];
+        let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+        let e2 = [v3[0] - v0[0], v3[1] - v0[1], v3[2] - v0[2]];
+        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+        let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-6);
+        let quad_normal = [nx / len, ny / len, nz / len];
+
         let base = vertices.len() as u32;
-        vertices.push(Vertex::with_color([ax_l, y0, az_l], *normal, [0.0, 0.0], *color));
-        vertices.push(Vertex::with_color([ax_r, y1, az_r], *normal, [1.0, 0.0], *color));
-        vertices.push(Vertex::with_color([bx_r, y2, bz_r], *normal, [1.0, 1.0], *color));
-        vertices.push(Vertex::with_color([bx_l, y3, bz_l], *normal, [0.0, 1.0], *color));
+        vertices.push(Vertex::with_color(v0, quad_normal, [0.0, 0.0], *color));
+        vertices.push(Vertex::with_color(v1, quad_normal, [1.0, 0.0], *color));
+        vertices.push(Vertex::with_color([bx_r, y2, bz_r], quad_normal, [1.0, 1.0], *color));
+        vertices.push(Vertex::with_color(v3, quad_normal, [0.0, 1.0], *color));
         indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 }
@@ -443,16 +487,19 @@ pub fn spawn_territory_citizens(
     sample_terrain_y: impl Fn(f32, f32) -> f32,
 ) {
     despawn_citizens(world);
-    let waypoint_count = all_waypoints_global().len();
     let mut rng = rand::thread_rng();
+    // Civilian names only — no overlap with Roger Young crew (Rico, Zim, Levy, Chen, Brice, Martinez, etc.)
     let names = [
-        "Carlos", "Maria", "Jake", "Yuki", "Hans", "Elena", "Rico", "Dizzy",
-        "Ace", "Sanders", "Deladrier", "Shujumi", "Zim", "Hendrick", "Levy",
-        "Chen", "O'Brien", "Vargas", "Kim", "Petra", "Miguel", "Sasha",
+        "Carlos", "Maria", "Jake", "Yuki", "Hans", "Elena", "Dizzy",
+        "Sanders", "Deladrier", "Shujumi", "Hendrick", "Nadia", "Viktor",
+        "O'Brien", "Vargas", "Kim", "Petra", "Miguel", "Sasha", "Anya",
+        "Omar", "Lena", "Felix", "Irina", "Marcus", "Sofia", "Tomas",
     ];
     let mut name_idx = 0;
+    let mut waypoint_start = 0;
     for place in FEDERATION_TERRITORY {
         let waypoints = place.waypoints_local;
+        let place_waypoint_count = waypoints.len();
         for _ in 0..place.citizen_count {
             let (lx, lz) = waypoints[rng.gen_range(0..waypoints.len())];
             let x = place.center_x + lx + rng.gen::<f32>() * 4.0 - 2.0;
@@ -469,9 +516,10 @@ pub fn spawn_territory_citizens(
                     scale: Vec3::splat(1.0),
                 },
                 Velocity::default(),
-                Citizen::new(name, dialogue_id, &mut rng, waypoint_count),
+                Citizen::new(name, dialogue_id, &mut rng, waypoint_start, place_waypoint_count),
             ));
         }
+        waypoint_start += place_waypoint_count;
     }
 }
 
@@ -530,6 +578,17 @@ const EARTH_BUILDINGS: &[(f32, f32, f32, f32, f32, [f32; 4])] = &[
     (138.0, -48.0, 10.0, 5.0, 8.0, OLIVE),
     (142.0, -42.0, 12.0, 4.0, 10.0, BUNKER),
 ];
+
+/// Terrain height for building placement: use max of four footprint corners so the building never floats on slopes.
+pub fn building_footprint_base_y<F: Fn(f32, f32) -> f32>(bx: f32, bz: f32, sx: f32, sz: f32, sample_terrain_y: F) -> f32 {
+    let hx = sx * 0.5;
+    let hz = sz * 0.5;
+    let y0 = sample_terrain_y(bx - hx, bz - hz);
+    let y1 = sample_terrain_y(bx + hx, bz - hz);
+    let y2 = sample_terrain_y(bx + hx, bz + hz);
+    let y3 = sample_terrain_y(bx - hx, bz + hz);
+    y0.max(y1).max(y2).max(y3)
+}
 
 /// Building box data for physics: (world_x, world_z, size_x, size_y, size_z).
 pub fn earth_building_boxes() -> &'static [(f32, f32, f32, f32, f32)] {
@@ -593,7 +652,8 @@ pub fn spawn_earth_buildings(
     sample_terrain_y: impl Fn(f32, f32) -> f32,
 ) {
     for &(bx, bz, sx, sy, sz, color) in EARTH_BUILDINGS {
-        let y = sample_terrain_y(bx, bz) + sy * 0.5;
+        let base_y = building_footprint_base_y(bx, bz, sx, sz, &sample_terrain_y);
+        let y = base_y + sy * 0.5;
         let pos = Vec3::new(bx, y, bz);
         let scale = Vec3::new(sx, sy, sz);
         let t = Transform {

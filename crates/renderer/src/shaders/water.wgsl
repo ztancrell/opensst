@@ -16,6 +16,7 @@ struct TerrainUniform {
     sun_direction: vec4<f32>,
     fog_params: vec4<f32>,
     deform_params: vec4<f32>,
+    snow_params: vec4<f32>,
 };
 
 @group(0) @binding(0)

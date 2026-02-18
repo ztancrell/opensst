@@ -17,6 +17,7 @@ struct TerrainUniform {
     sun_direction: vec4<f32>,
     fog_params: vec4<f32>,            // x = density, y = height_falloff, z = start, w = end
     deform_params: vec4<f32>,         // x = origin_x, y = origin_z, z = half_size, w = enabled
+    snow_params: vec4<f32>,           // x = snow_enabled, yzw unused
 };
 
 @group(0) @binding(0)
@@ -30,6 +31,28 @@ var deform_tex: texture_2d<f32>;
 
 @group(0) @binding(3)
 var deform_sampler: sampler;  // Unused in vertex; textureLoad used for vertex-stage compatibility
+
+@group(0) @binding(4)
+var snow_tex: texture_2d<f32>;
+
+@group(0) @binding(5)
+var snow_sampler: sampler;
+
+struct ShadowUniform {
+    light_view_proj: mat4x4<f32>,
+    camera_pos: vec3<f32>,
+    planet_radius: f32,
+    _pad: vec3<f32>,
+}
+
+@group(1) @binding(0)
+var<uniform> shadow: ShadowUniform;
+
+@group(1) @binding(1)
+var shadow_tex: texture_depth_2d;
+
+@group(1) @binding(2)
+var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -659,8 +682,37 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
         pos.y -= curvature_drop;
     }
 
-    // Terrain deformation: footprints/trails in snow and sand (Helldivers 2 / Dune style)
-    // Use textureLoad (not textureSample) so vertex stage is valid on all backends
+    // Snow accumulation (weather-driven): knee-deep snow, same region as deform.
+    var world_normal = vertex.normal;
+    let snow_enabled = terrain.snow_params.x > 0.5;
+    if (snow_enabled) {
+        let origin_x = terrain.deform_params.x;
+        let origin_z = terrain.deform_params.y;
+        let half_size = terrain.deform_params.z;
+        let u = (pos.x - origin_x) / (2.0 * half_size) + 0.5;
+        let v = (pos.z - origin_z) / (2.0 * half_size) + 0.5;
+        let tex_size = 256;
+        let tex_size_f = f32(tex_size);
+        let u_clamped = clamp(u, 0.0, 1.0);
+        let v_clamped = clamp(v, 0.0, 1.0);
+        let px = clamp(i32(floor(u_clamped * tex_size_f)), 0, tex_size - 1);
+        let py = clamp(i32(floor(v_clamped * tex_size_f)), 0, tex_size - 1);
+        let fx = fract(u_clamped * tex_size_f);
+        let fy = fract(v_clamped * tex_size_f);
+        let s00 = textureLoad(snow_tex, vec2<i32>(px, py), 0).r;
+        let s10 = textureLoad(snow_tex, vec2<i32>(min(px + 1, tex_size - 1), py), 0).r;
+        let s01 = textureLoad(snow_tex, vec2<i32>(px, min(py + 1, tex_size - 1)), 0).r;
+        let s11 = textureLoad(snow_tex, vec2<i32>(min(px + 1, tex_size - 1), min(py + 1, tex_size - 1)), 0).r;
+        let snow_val = mix(mix(s00, s10, fx), mix(s01, s11, fx), fy);
+        let edge = 0.06;
+        let fade_u = smoothstep(0.0, edge, u) * smoothstep(0.0, edge, 1.0 - u);
+        let fade_v = smoothstep(0.0, edge, v) * smoothstep(0.0, edge, 1.0 - v);
+        let snow_fade = fade_u * fade_v;
+        pos.y += snow_val * snow_fade;
+    }
+
+    // Terrain deformation: footprints/trails in snow and sand (Helldivers 2 / Dune style).
+    // Bilinear sampling + recomputed normals so depressions look curved, not flat.
     let deform_enabled = terrain.deform_params.w > 0.5;
     if (deform_enabled) {
         let origin_x = terrain.deform_params.x;
@@ -668,20 +720,44 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
         let half_size = terrain.deform_params.z;
         let u = (pos.x - origin_x) / (2.0 * half_size) + 0.5;
         let v = (pos.z - origin_z) / (2.0 * half_size) + 0.5;
-        if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0) {
-            let tex_size = 256;
-            var px = i32(floor(u * f32(tex_size)));
-            var py = i32(floor(v * f32(tex_size)));
-            px = clamp(px, 0, tex_size - 1);
-            py = clamp(py, 0, tex_size - 1);
-            let offset = textureLoad(deform_tex, vec2<i32>(px, py), 0).r;
-            pos.y -= offset;
-        }
+        let tex_size = 256;
+        let tex_size_f = f32(tex_size);
+        let u_clamped = clamp(u, 0.0, 1.0);
+        let v_clamped = clamp(v, 0.0, 1.0);
+        let px = clamp(i32(floor(u_clamped * tex_size_f)), 0, tex_size - 1);
+        let py = clamp(i32(floor(v_clamped * tex_size_f)), 0, tex_size - 1);
+        let fx = fract(u_clamped * tex_size_f);
+        let fy = fract(v_clamped * tex_size_f);
+
+        // Bilinear sample for displacement (smoother depressions)
+        let o00 = textureLoad(deform_tex, vec2<i32>(px, py), 0).r;
+        let o10 = textureLoad(deform_tex, vec2<i32>(min(px + 1, tex_size - 1), py), 0).r;
+        let o01 = textureLoad(deform_tex, vec2<i32>(px, min(py + 1, tex_size - 1)), 0).r;
+        let o11 = textureLoad(deform_tex, vec2<i32>(min(px + 1, tex_size - 1), min(py + 1, tex_size - 1)), 0).r;
+        let ox = mix(mix(o00, o10, fx), mix(o01, o11, fx), fy);
+
+        // Smooth fade at region edges so no hard boundary
+        let edge = 0.06;
+        let fade_u = smoothstep(0.0, edge, u) * smoothstep(0.0, edge, 1.0 - u);
+        let fade_v = smoothstep(0.0, edge, v) * smoothstep(0.0, edge, 1.0 - v);
+        let fade = fade_u * fade_v;
+        let offset = ox * fade;
+
+        pos.y -= offset;
+
+        // Recompute normal from height gradient so depressions are properly lit (satisfying curvature)
+        let world_cell = (2.0 * half_size) / tex_size_f;
+        let d_du = mix(o10 - o00, o11 - o01, fy);
+        let d_dv = mix(o01 - o00, o11 - o10, fx);
+        let d_offset_dx = d_du / world_cell;
+        let d_offset_dz = d_dv / world_cell;
+        let deformed_n = normalize(vec3<f32>(d_offset_dx, 1.0, d_offset_dz));
+        world_normal = normalize(mix(vertex.normal, deformed_n, fade));
     }
 
     out.world_position = pos;
     out.clip_position = camera.view_proj * vec4<f32>(pos, 1.0);
-    out.world_normal = normalize(vertex.normal);
+    out.world_normal = world_normal;
     out.uv = vertex.uv;
     out.biome_color = vertex.color;
     return out;
@@ -741,9 +817,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ---- BIOME TINT FROM VERTEX COLOR ----
     // Vertex color carries per-vertex biome blend from procgen; use it as primary tint.
     // Fallback to uniform when vertex color is missing (alpha 0) or effectively black (uninitialized).
+    // Earth override: when uniform is Earth-like (green-dominant), prefer it so Mountain vertex grey doesn't produce ash/blue artifacts.
     let vertex_rgb = in.biome_color.rgb;
+    let uniform_base = terrain.biome_colors[0].rgb;
+    let is_earth_palette = uniform_base.g > 0.45 && uniform_base.g >= uniform_base.r && uniform_base.g >= uniform_base.b;
     let has_vertex_color = in.biome_color.a > 0.01 && (vertex_rgb.r + vertex_rgb.g + vertex_rgb.b) > 0.05;
-    let biome_tint = select(terrain.biome_colors[0].rgb, vertex_rgb, has_vertex_color);
+    let use_uniform = !has_vertex_color || is_earth_palette;
+    let biome_tint = select(vertex_rgb, uniform_base, use_uniform);
 
     // Classify biome from color heuristics (for procedural material selection)
     let warmth = biome_tint.r - biome_tint.b;
@@ -856,7 +936,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let toon_bands = 6.0;
     let toon_lambert = floor(half_lambert * toon_bands + 0.5) / toon_bands;
     let smooth_lambert = mix(toon_lambert, half_lambert, 0.35);
-    let diffuse = sun_color * smooth_lambert * sun_intensity;
+    var diffuse = sun_color * smooth_lambert * sun_intensity;
+
+    // Shadow map: sample sun shadow (directional light)
+    let light_clip = shadow.light_view_proj * vec4<f32>(world_p, 1.0);
+    let light_ndc = light_clip.xyz / light_clip.w;
+    let shadow_uv = light_ndc.xy * 0.5 + 0.5;
+    let depth_compare = light_ndc.z * 0.5 + 0.5 + 0.002;
+    let in_bounds = all(shadow_uv >= vec2<f32>(0.0)) && all(shadow_uv <= vec2<f32>(1.0));
+    let shadow_factor = select(1.0, textureSampleCompare(shadow_tex, shadow_sampler, shadow_uv, depth_compare), in_bounds);
+    diffuse *= shadow_factor;
 
     // Specular: Blinn-Phong with roughness variation (slightly sharper for stylized look)
     let h = normalize(light_dir + view_dir);

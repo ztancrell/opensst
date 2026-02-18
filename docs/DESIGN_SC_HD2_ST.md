@@ -1,6 +1,6 @@
 # OpenSST: Star Citizen × Helldivers 2 × Starship Troopers
 
-**Vision:** A realistic space first-person bug hunter that combines the scale and immersion of **Star Citizen**, the co-op tactics and stratagems of **Helldivers 2**, and the military-sci‑fi feel of **Starship Troopers**.
+**Vision:** A **full universe sim** like Star Citizen — persistent galaxy, 100 star systems, travel and contracts — with **bug killing** at its core: Starship Troopers × Helldivers 2. First-person on foot and aboard ship; drop, fight, extract; galactic war and liberation persist.
 
 ---
 
@@ -8,35 +8,39 @@
 
 | Pillar | Source | In OpenSST |
 |--------|--------|----------------|
-| **Space first-person** | Star Citizen | FPS on ground; ship phase aboard Roger Young; future: pilot approach, EVA. |
+| **Full universe sim** | Star Citizen | 100-system procedural galaxy; main menu Universe Map (pick system, Enter = travel & board); M in ship = galaxy map / warp. |
+| **Space first-person** | Star Citizen | FPS on ground; ship phase aboard Roger Young; cockpit approach; EVA to drop pod. |
 | **Orbital deployment** | All three | Drop pods from orbit, retrieval boat extraction, fleet in space. |
-| **Stratagems / call-ins** | Helldivers 2 | Tac Fighter CAS, extraction, supply drop; more call-ins (orbital strike, reinforce). |
-| **Mission structure** | HD2 + ST | Mission types (Extermination, Bug Hunt, Hold the Line); select planet → deploy → complete objective → extract. |
-| **MI vs bugs** | Starship Troopers | Trooper classes, squad, fleet, Roger Young, cinematic military tone. |
-| **Realistic space** | Star Citizen | Space sky, fleet corvettes, orbit/atmosphere blend, cinematic renderer. |
+| **Stratagems / call-ins** | Helldivers 2 | Tac Fighter CAS, extraction, supply drop; orbital strike, reinforce. |
+| **Mission / contracts** | HD2 + SC | War table = mission board: CONTRACT (type — planet). Reward: Liberation. Keys 1–5; select planet → deploy. |
+| **MI vs bugs** | Starship Troopers | Trooper classes, squad, Roger Young, Federation Bulletin, cinematic military tone. |
+| **Realistic space** | Star Citizen | Space sky, orbits, fleet, orbit/atmosphere blend, cinematic renderer. |
 
 ---
 
 ## Current Loop
 
-1. **In Ship** – Aboard Roger Young; war table to pick system/planet and mission (1–5); walk to drop bay.
-2. **Approach** – First-person cockpit view; SPACE to begin EVA.
-3. **EVA** – Zero-G float to drop pod; [E] or 6s to enter pod.
-4. **Drop** – Pod descent to planet (streaming terrain).
-5. **Playing** – FPS bug hunt, stratagems [B/N/R], extraction [V], tac fighter, squad.
-6. **Extract** – Retrieval boat → orbit → Roger Young; space + fleet.
-7. **Back to Ship** – Stats; galactic war progress saved. Ready for next drop.
+1. **Main menu** – Continue (saved system) / Universe Map (pick any of 100 systems, Enter = travel & board) / Quit.
+2. **In Ship** – Aboard Roger Young; Federation Bulletin (sector liberation, major order); war table: CONTRACT (mission — planet), keys 1–5, pick planet; walk to drop bay.
+3. **Approach** – First-person cockpit view; SPACE to begin EVA.
+4. **EVA** – Zero-G float to drop pod; [E] or 6s to enter pod.
+5. **Drop** – Pod descent to planet (streaming terrain).
+6. **Playing** – FPS bug hunt, stratagems [B/N/R], extraction [V], tac fighter, squad.
+7. **Extract** – Retrieval boat → orbit → Roger Young; space + fleet.
+8. **Back to Ship** – Stats; galactic war progress saved. Ready for next drop.
 
 ---
 
 ## Roadmap (High Level)
 
-- **Mission system** – Done. Typed missions (Extermination, Bug Hunt, Hold the Line, Defense, Hive Destruction) with objectives and “Mission complete – extract when ready”. War table keys 1–5.
+- **Full universe** – Done. 100 star systems; main menu Universe Map (select system, Enter = travel & board); M in ship = galaxy map / warp.
+- **Mission / contract board** – Done. War table shows CONTRACT: [type] — [planet]. Reward: Liberation. Typed missions (Extermination, Bug Hunt, Hold the Line, Defense, Hive Destruction) with objectives and “Mission complete – extract when ready”. War table keys 1–5.
+- **Federation Bulletin** – Done. On entering ship: sector liberation %, major order.
 - **Stratagems** – Done. Orbital Strike [B], Supply Drop [N], Reinforce [R], Extraction [V]; key-bound with cooldowns and smoke.
 - **First-person piloting** – Done. Approach phase: cockpit view toward planet; SPACE to begin EVA.
 - **Galactic war** – Done. Liberation, kills, extractions, major orders. **Persistent save**: `opensst_save.ron` (seed + current system + war state); load on startup, save on extraction.
 - **EVA / zero-G** – Done. EVA phase: zero-G float from ship to drop pod (WASD thrust, SPACE/Ctrl up/down); [E] or timer to enter pod → drop sequence.
-- **Larger scale** – More planets/systems/missions. **Co-op (networked)** – deferred.
+- **Co-op (networked)** – Deferred.
 
 ---
 

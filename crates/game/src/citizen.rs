@@ -87,8 +87,12 @@ pub struct Citizen {
     /// Index into dialogue content (dialogue.rs).
     pub dialogue_id: usize,
     pub schedule: CitizenSchedule,
-    /// Current waypoint index (destination).
+    /// Current waypoint index (destination) — global index into waypoints list.
     pub waypoint_idx: usize,
+    /// Start index of this citizen's district in the global waypoint list (territory) or 0 (legacy).
+    pub waypoint_start: usize,
+    /// Number of waypoints in this citizen's district (so they stay local).
+    pub waypoint_count: usize,
     /// Time at current activity (for schedule transitions and re-pick).
     pub phase_timer: f32,
     /// Base walk speed (m/s). Modified by schedule (commute faster, recreation slower).
@@ -102,15 +106,26 @@ pub struct Citizen {
 }
 
 impl Citizen {
-    pub fn new(display_name: String, dialogue_id: usize, rng: &mut impl Rng, waypoint_count: usize) -> Self {
+    /// Create a citizen. For territory: pass waypoint_start and waypoint_count for their district so they stay local.
+    /// For legacy single-settlement: pass waypoint_start = 0, waypoint_count = total waypoints.
+    pub fn new(
+        display_name: String,
+        dialogue_id: usize,
+        rng: &mut impl Rng,
+        waypoint_start: usize,
+        waypoint_count: usize,
+    ) -> Self {
         let schedule = CitizenSchedule::Home;
-        let waypoint_idx = waypoints_for_schedule(schedule, rng, waypoint_count);
+        let local_idx = waypoints_for_schedule(schedule, rng, waypoint_count);
+        let waypoint_idx = waypoint_start + local_idx;
         let phase_timer = rng.gen::<f32>() * 25.0; // Stagger so re-picks are spread out
         Self {
             display_name,
             dialogue_id,
             schedule,
             waypoint_idx,
+            waypoint_start,
+            waypoint_count,
             phase_timer,
             walk_speed: 1.1 + rng.gen::<f32>() * 0.5,
             schedule_offset: (rng.gen::<f32>() - 0.5) * 0.16, // -0.08..0.08
@@ -158,9 +173,11 @@ pub fn spawn_earth_citizens(
     count: usize,
 ) {
     let mut rng = rand::thread_rng();
+    // Civilian names only — no overlap with Roger Young crew (Rico, Zim, Levy, etc.)
     let names = [
-        "Carlos", "Maria", "Jake", "Yuki", "Hans", "Elena", "Rico", "Dizzy",
-        "Ace", "Sanders", "Deladrier", "Shujumi", "Zim", "Hendrick", "Levy",
+        "Carlos", "Maria", "Jake", "Yuki", "Hans", "Elena", "Dizzy",
+        "Sanders", "Deladrier", "Shujumi", "Hendrick", "Nadia", "Viktor",
+        "Anya", "Omar", "Lena", "Felix", "Irina", "Marcus", "Sofia",
     ];
     let n = SETTLEMENT_WAYPOINTS.len();
     for i in 0..count {
@@ -174,7 +191,7 @@ pub fn spawn_earth_citizens(
         world.spawn((
             Transform { position: pos, rotation: Quat::IDENTITY, scale: Vec3::splat(1.0) },
             Velocity::default(),
-            Citizen::new(name, dialogue_id, &mut rng, n),
+            Citizen::new(name, dialogue_id, &mut rng, 0, n),
         ));
     }
 }
@@ -202,7 +219,7 @@ pub fn update_citizens(
     dt: f32,
     sample_terrain_y: impl Fn(f32, f32) -> f32,
 ) {
-    let bad_weather = matches!(weather.current, WeatherState::Rain | WeatherState::Storm);
+        let bad_weather = matches!(weather.current, WeatherState::Rain | WeatherState::Storm | WeatherState::Snow);
     let mut rng = rand::thread_rng();
     let wp_len = waypoints.len().max(1);
     let _legacy = waypoints.is_empty();
@@ -220,7 +237,8 @@ pub fn update_citizens(
 
         if target_schedule != citizen.schedule {
             citizen.schedule = target_schedule;
-            citizen.waypoint_idx = waypoints_for_schedule(target_schedule, &mut rng, wp_len);
+            let local = waypoints_for_schedule(target_schedule, &mut rng, citizen.waypoint_count);
+            citizen.waypoint_idx = citizen.waypoint_start + local;
             citizen.phase_timer = 0.0;
             citizen.dwell_until = 0.0;
             citizen.next_wander_at = 18.0 + rng.gen::<f32>() * 25.0;
@@ -230,20 +248,20 @@ pub fn update_citizens(
         // Staggered re-pick: only after dwell at destination and next_wander_at (no synchronized crowd).
         let may_repick = citizen.phase_timer > citizen.next_wander_at && citizen.phase_timer > citizen.dwell_until;
         if may_repick {
-            citizen.waypoint_idx = waypoints_for_schedule(citizen.schedule, &mut rng, wp_len);
+            let local = waypoints_for_schedule(citizen.schedule, &mut rng, citizen.waypoint_count);
+            citizen.waypoint_idx = citizen.waypoint_start + local;
             citizen.next_wander_at = citizen.phase_timer + 20.0 + rng.gen::<f32>() * 28.0;
             citizen.dwell_until = 0.0; // will be set again when they arrive
         }
 
         let idx = citizen.waypoint_idx.min(wp_len.saturating_sub(1));
-        let (wx, wz) = if waypoints.is_empty() {
+        let (target_x, target_z) = if waypoints.is_empty() {
             let (ow, oz) = SETTLEMENT_WAYPOINTS[idx.min(SETTLEMENT_WAYPOINTS.len().saturating_sub(1))];
             (settlement_center.x + ow, settlement_center.z + oz)
         } else {
+            // Territory: waypoints are global (world x, z)
             waypoints[idx]
         };
-        let target_x = if waypoints.is_empty() { wx } else { settlement_center.x + wx };
-        let target_z = if waypoints.is_empty() { wz } else { settlement_center.z + wz };
         let dx = target_x - transform.position.x;
         let dz = target_z - transform.position.z;
         let dist_sq = dx * dx + dz * dz;

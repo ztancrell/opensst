@@ -9,6 +9,7 @@ use crate::earth_territory;
 use crate::extraction::{self, ExtractionPhase};
 use crate::roger_young_interior_npcs;
 use crate::squad::SquadMate;
+use crate::state::{DEPLOY_KEY, DIALOGUE_CHOICE_KEYS, DIALOGUE_CLOSE_KEY, INTERACT_KEY};
 use crate::{DropPhase, GameMessage, GamePhase, GameState};
 
 /// Build the screen-space overlay (debug info, HUD, game messages, war table, etc.).
@@ -24,27 +25,81 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
     let tactical_green = [0.0, 1.0, 0.0, 1.0];
     let tactical_amber = [1.0, 0.67, 0.0, 1.0];
 
-    // ---- Main menu: minimal (dark background + title + Play/Quit only) ----
-    if state.phase == GamePhase::MainMenu {
+    // ---- Main menu: Star Citizen / Helldivers 2 style — Continue, Universe Map, Quit ----
+    if state.phase == GamePhase::MainMenu && !state.main_menu_galaxy_open {
         let title = "OpenSST";
+        let subtitle = "Starship Troopers × Helldivers 2 × Star Citizen";
         let title_scale = 1.8;
         let title_w = title.len() as f32 * 8.0 * title_scale;
-        tb.add_text(sw * 0.5 - title_w * 0.5, sh * 0.35, title, title_scale, [0.9, 0.88, 0.75, 1.0]);
+        tb.add_text(sw * 0.5 - title_w * 0.5, sh * 0.28, title, title_scale, [0.9, 0.88, 0.75, 1.0]);
+        let sub_w = subtitle.len() as f32 * 5.0;
+        tb.add_text(sw * 0.5 - sub_w * 0.5, sh * 0.34, subtitle, 1.0, [0.5, 0.55, 0.65, 1.0]);
 
-        let play_sel = state.main_menu_selected == 0;
-        let quit_sel = state.main_menu_selected == 1;
-        let menu_y = sh * 0.55;
-        let menu_x = sw * 0.5 - 36.0;
-        let item_h = 24.0;
+        let first_sel = state.main_menu_selected == 0;
+        let universe_sel = state.main_menu_selected == 1;
+        let quit_sel = state.main_menu_selected == 2;
+        let menu_y = sh * 0.52;
+        let menu_x = sw * 0.5 - 90.0;
+        let item_h = 26.0;
         let item_scale = 1.4;
         let sel = [0.95, 0.9, 0.7, 1.0];
         let unsel = [0.6, 0.62, 0.68, 1.0];
 
-        tb.add_text(menu_x, menu_y, "Play", item_scale, if play_sel { sel } else { unsel });
-        tb.add_text(menu_x, menu_y + item_h, "Quit", item_scale, if quit_sel { sel } else { unsel });
+        let first_label = if state.has_save { "Continue — Roger Young" } else { "Play" };
+        tb.add_text(menu_x, menu_y, first_label, item_scale, if first_sel { sel } else { unsel });
+        tb.add_text(menu_x, menu_y + item_h, "Universe Map", item_scale, if universe_sel { sel } else { unsel });
+        tb.add_text(menu_x, menu_y + item_h * 2.0, "Quit", item_scale, if quit_sel { sel } else { unsel });
+        tb.add_text(sw * 0.5 - 100.0, menu_y + item_h * 3.5, "↑/↓ or W/S — Select   Enter — Confirm", 1.0, gray);
 
         return tb;
     }
+
+    // ---- Main menu galaxy map (when Universe Map is open from menu) ----
+    if state.phase == GamePhase::MainMenu && state.main_menu_galaxy_open {
+        // Full universe view; Enter = travel to selected system and board Roger Young
+        {
+            tb.add_rect(sw * 0.1, sh * 0.1, sw * 0.8, sh * 0.8, [0.0, 0.0, 0.05, 0.85]);
+            let title = format!("UNIVERSE — {} systems | Select destination", state.universe.systems.len());
+            tb.add_text(sw * 0.12, sh * 0.12, &title, scale, [0.6, 0.8, 1.0, 1.0]);
+            let map_cx = sw * 0.5;
+            let map_cy = sh * 0.5;
+            let map_scale = sh * 0.3 / 1000.0;
+            let current_pos = state.universe.systems[state.current_system_idx].position;
+            for (i, entry) in state.universe.systems.iter().enumerate() {
+                let rel = entry.position - current_pos;
+                let sx = map_cx + rel.x as f32 * map_scale;
+                let sy = map_cy - rel.z as f32 * map_scale;
+                if sx < sw * 0.1 || sx > sw * 0.9 || sy < sh * 0.1 || sy > sh * 0.9 {
+                    continue;
+                }
+                let star_color = match entry.star_type {
+                    StarType::RedDwarf => [1.0, 0.3, 0.2, 0.9],
+                    StarType::YellowMain => [1.0, 0.95, 0.5, 0.9],
+                    StarType::BlueGiant => [0.5, 0.6, 1.0, 0.9],
+                    StarType::WhiteDwarf => [0.9, 0.9, 1.0, 0.8],
+                    StarType::BinaryStar => [1.0, 0.8, 0.4, 0.9],
+                };
+                let dot_size = if i == state.current_system_idx { 8.0 } else if i == state.galaxy_map_selected { 6.0 } else { 4.0 };
+                if i == state.current_system_idx {
+                    tb.add_rect(sx - dot_size, sy - dot_size, dot_size * 2.0, dot_size * 2.0, [0.0, 1.0, 0.0, 0.4]);
+                }
+                if i == state.galaxy_map_selected {
+                    tb.add_rect(sx - dot_size - 1.0, sy - dot_size - 1.0, dot_size * 2.0 + 2.0, dot_size * 2.0 + 2.0, [1.0, 1.0, 0.0, 0.5]);
+                }
+                tb.add_rect(sx - dot_size * 0.5, sy - dot_size * 0.5, dot_size, dot_size, star_color);
+                if i == state.current_system_idx || i == state.galaxy_map_selected || entry.visited {
+                    tb.add_text(sx + dot_size, sy - 4.0, &entry.name, 1.5, star_color);
+                }
+            }
+            let selected = &state.universe.systems[state.galaxy_map_selected];
+            let sel_info = format!("Selected: {} ({:?})", selected.name, selected.star_type);
+            tb.add_text_with_bg(sw * 0.12, sh * 0.82, &sel_info, scale, yellow, bg);
+            tb.add_text_with_bg(sw * 0.12, sh * 0.85, "Enter = Travel to system & board Roger Young | M / Esc = Back", scale, gray, bg);
+        }
+        return tb;
+    }
+
+    // (Galaxy map when in-ship is drawn later via state.galaxy_map_open)
 
     // ---- Pause menu: full-screen dark overlay ----
     if state.phase == GamePhase::Paused {
@@ -459,6 +514,8 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                             [0.15, 0.5, 0.2, 0.8]
                         } else if is_sel {
                             [0.3, 0.5, 0.9, 0.9]
+                        } else if planet.has_unknown_intel {
+                            [0.35, 0.38, 0.45, 0.75] // Unknown intel: neutral grey — troopers don't know what they're dropping into
                         } else if planet.danger_level > 7 {
                             [0.7, 0.15, 0.1, 0.7]
                         } else if planet.danger_level > 4 {
@@ -498,15 +555,21 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                     let ds = 1.5;
                     let line_hd = 18.0;
                     tb.add_text(dx, dy, &format!("TARGET: {}", dp.name), ds, [1.0, 0.9, 0.5, 1.0]); dy += line_hd;
+                    // Star Citizen / Helldivers 2: contract-style mission board
+                    let mission_str = state.next_mission_type.name().to_string();
+                    let contract = format!("CONTRACT: {} — {}. Reward: Liberation progress.", mission_str, dp.name);
+                    tb.add_text(dx, dy, &contract, 1.1, [0.5, 0.75, 1.0, 1.0]); dy += line_hd;
                     let is_earth = dp.name == "Earth";
                     if is_earth {
                         // Earth: no danger counter — safe zone, visit only
                         tb.add_text(dx, dy, "Mission: Visit | Biome: All", ds, [0.7, 0.7, 0.8, 1.0]); dy += line_hd;
                         tb.add_text(dx, dy, "Safe zone — no combat. Homeworld.", ds, [0.4, 0.7, 0.5, 0.9]); dy += line_hd;
                     } else {
-                        let mission_str = state.next_mission_type.name().to_string();
-                        let biome_str = format!("{:?}", dp.primary_biome);
-                        let danger_str = format!("{}/10", dp.danger_level);
+                        let (biome_str, danger_str) = if dp.has_unknown_intel {
+                            ("???".to_string(), "???".to_string())
+                        } else {
+                            (format!("{:?}", dp.primary_biome), format!("{}/10", dp.danger_level))
+                        };
                         tb.add_text(dx, dy, &format!("Mission: {} | Biome: {} | Danger: {}", mission_str, biome_str, danger_str), ds, [0.7, 0.7, 0.8, 1.0]); dy += line_hd;
                         let lib_val = dws.map_or(0.0, |s| s.liberation);
                         tb.add_text(dx, dy, &format!("Liberation: {:.0}% | Kills: {} | Extractions: {}",
@@ -520,9 +583,9 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                         }
                     }
 
-                    let ctrl = "[↑/↓ or W/Q] System   [A/D] Planet   [1-5] Mission   [E] Close   [SPACE] Deploy";
+                    let ctrl = format!("[↑/↓ or W/Q] System   [A/D] Planet   [1-5] Mission   [{}] Close   [{}] Deploy", INTERACT_KEY, DEPLOY_KEY);
                     let ctrl_w = ctrl.len() as f32 * 6.0 * 1.5;
-                    tb.add_text(sw * 0.5 - ctrl_w * 0.5, by + bh - 20.0, ctrl, 1.5, [0.5, 0.7, 1.0, 0.8]);
+                    tb.add_text(sw * 0.5 - ctrl_w * 0.5, by + bh - 20.0, &ctrl, 1.5, [0.5, 0.7, 1.0, 0.8]);
 
                     let ticker_texts = [
                         "FEDERAL NETWORK: \"The only good bug is a dead bug!\"",
@@ -534,21 +597,18 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                     let ticker_x = sw - (state.war_state.ticker_offset % (ticker_w + sw));
                     tb.add_text(ticker_x, by + bh - 6.0, &full_ticker, 1.0, [0.4, 0.5, 0.6, 0.5]);
                 } else {
-                    if dist_to_table < 4.0 {
-                        let prompt = "[E] ACCESS WAR TABLE";
-                        let pw = prompt.len() as f32 * 6.0 * 2.5;
-                        tb.add_rect(cx - pw * 0.5 - 6.0, cy + 40.0, pw + 12.0, 30.0, [0.02, 0.03, 0.06, 0.7]);
+                    // Dynamic interaction prompt (war table, drop bay, or talk to NPC)
+                    if let Some(ref prompt) = state.interaction_prompt {
+                        let text = prompt.display_text();
+                        let pw = text.len() as f32 * 6.0 * 2.5;
                         let flash = (timer * 2.5).sin() * 0.3 + 0.7;
-                        tb.add_text(cx - pw * 0.5, cy + 46.0, prompt, 2.5, [0.3 + flash * 0.3, 0.6 + flash * 0.2, 1.0, 1.0]);
-                    }
-
-                    if dist_to_bay < 4.0 {
-                        let target_name = &state.planet.name;
-                        let prompt = format!("[SPACE] DEPLOY TO {}", target_name);
-                        let pw = prompt.len() as f32 * 6.0 * 2.5;
-                        let flash = (timer * 3.0).sin() * 0.5 + 0.5;
-                        tb.add_rect(cx - pw * 0.5 - 6.0, cy + 40.0, pw + 12.0, 30.0, [0.1, 0.02, 0.02, 0.7]);
-                        tb.add_text(cx - pw * 0.5, cy + 46.0, &prompt, 2.5, [1.0, 0.5 * flash + 0.3, 0.1, 1.0]);
+                        let (bg, fg) = if prompt.key == "SPACE" {
+                            ([0.1, 0.02, 0.02, 0.7], [1.0, 0.5 * flash + 0.3, 0.1, 1.0])
+                        } else {
+                            ([0.02, 0.03, 0.06, 0.7], [0.3 + flash * 0.3, 0.6 + flash * 0.2, 1.0, 1.0])
+                        };
+                        tb.add_rect(cx - pw * 0.5 - 6.0, cy + 40.0, pw + 12.0, 30.0, bg);
+                        tb.add_text(cx - pw * 0.5, cy + 46.0, &text, 2.5, fg);
                     }
 
                     let hint = format!("Target: {} | WAR TABLE forward | DROP BAY aft", state.planet.name);
@@ -746,23 +806,56 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
         }
     }
 
-    // ---- Warp effect overlay ----
+    // ---- FTL warp effect overlay: Roger Young jumping to target system ----
     if let Some(ref warp) = state.warp_sequence {
         let progress = warp.progress();
-        let alpha = (progress * 2.0).min(1.0) * 0.7;
-        tb.add_rect(0.0, 0.0, sw, sh, [0.0, 0.0, 0.1, alpha]);
+        let dest_name = state.universe.systems.get(warp.target_system_idx).map(|e| e.name.as_str()).unwrap_or("?");
+        // Dark blue full-screen vignette (stronger toward end)
+        let alpha = 0.5 + progress * 0.35;
+        tb.add_rect(0.0, 0.0, sw, sh, [0.02, 0.04, 0.12, alpha]);
 
-        let warp_text = format!("WARPING... {:.0}%", progress * 100.0);
-        let text_w = warp_text.len() as f32 * 6.0 * 3.0;
-        tb.add_text(sw * 0.5 - text_w * 0.5, sh * 0.5, &warp_text, 3.0, [0.5, 0.8, 1.0, 1.0]);
-
-        let num_lines = (progress * 20.0) as usize;
-        for i in 0..num_lines {
-            let ly = (i as f32 / num_lines as f32) * sh;
-            let lw = 50.0 + progress * 200.0;
-            let lx = ((i as f32 * 37.0) % sw) - lw * 0.5;
-            tb.add_rect(lx, ly, lw, 2.0, [0.4, 0.6, 1.0, 0.3 * progress]);
+        // Star streaks: horizontal and vertical tunnel lines (FTL effect; overlay uses axis-aligned rects)
+        let elapsed = warp.timer;
+        let streak_alpha = 0.12 + progress * 0.35;
+        for i in 0..40 {
+            let t = (i as f32 / 40.0) * 2.0 - 1.0;
+            let ly = sh * (0.2 + 0.6 * (t * 0.5 + 0.5)) + (elapsed * 80.0 + i as f32 * 20.0) % 60.0 - 30.0;
+            let lw = 100.0 + progress * 400.0 + (i as f32 * 13.0).sin() * 80.0;
+            let lx = (sw - lw) * 0.5 + (elapsed * 30.0 + i as f32 * 17.0).sin() * 40.0;
+            tb.add_rect(lx, ly, lw, 2.0, [0.45, 0.7, 1.0, streak_alpha]);
         }
+        for i in 0..24 {
+            let t = (i as f32 / 24.0) * 2.0 - 1.0;
+            let lx = sw * (0.25 + 0.5 * (t * 0.5 + 0.5)) + (elapsed * 60.0 + i as f32 * 25.0) % 50.0 - 25.0;
+            let lh = 60.0 + progress * 250.0 + (i as f32 * 11.0).cos() * 40.0;
+            let ly = (sh - lh) * 0.5 + (elapsed * 40.0 + i as f32 * 19.0).sin() * 30.0;
+            tb.add_rect(lx, ly, 2.0, lh, [0.4, 0.65, 0.95, streak_alpha * 0.9]);
+        }
+
+        // Ship name and destination
+        let header = "FNS ROGER YOUNG — FTL JUMP";
+        let header_w = header.len() as f32 * 6.0 * 2.0;
+        tb.add_text(sw * 0.5 - header_w * 0.5, sh * 0.22, header, 2.0, [0.6, 0.85, 1.0, 1.0]);
+        let dest_text = format!("DESTINATION: {}", dest_name);
+        let dest_w = dest_text.len() as f32 * 6.0 * 1.8;
+        tb.add_text(sw * 0.5 - dest_w * 0.5, sh * 0.30, &dest_text, 1.8, [0.7, 0.9, 1.0, 1.0]);
+
+        // Progress bar
+        let bar_y = sh * 0.52;
+        let bar_w = sw * 0.5;
+        let bar_h = 12.0;
+        let bar_x = sw * 0.5 - bar_w * 0.5;
+        tb.add_rect(bar_x - 2.0, bar_y - 2.0, bar_w + 4.0, bar_h + 4.0, [0.1, 0.15, 0.3, 0.9]);
+        tb.add_rect(bar_x, bar_y, bar_w, bar_h, [0.05, 0.08, 0.15, 1.0]);
+        tb.add_rect(bar_x, bar_y, bar_w * progress, bar_h, [0.2, 0.5, 0.9, 0.95]);
+        let pct_text = format!("{:.0}%", progress * 100.0);
+        let pct_w = pct_text.len() as f32 * 6.0 * 2.2;
+        tb.add_text(sw * 0.5 - pct_w * 0.5, bar_y + bar_h + 8.0, &pct_text, 2.2, [0.6, 0.85, 1.0, 1.0]);
+
+        // Subtitle
+        let sub = if progress >= 1.0 { "ARRIVING..." } else { "QUANTUM DRIVE ACTIVE" };
+        let sub_w = sub.len() as f32 * 6.0 * 1.2;
+        tb.add_text(sw * 0.5 - sub_w * 0.5, sh * 0.68, sub, 1.2, [0.45, 0.6, 0.8, 0.9]);
     }
 
     // ---- FPS HUD (crosshair, health, ammo) ----
@@ -844,7 +937,7 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
 
         let ammo_x = cx + 30.0;
         if state.player.is_shovel_equipped() {
-            let shovel_hint = "LMB to dig".to_string();
+            let shovel_hint = "Hold LMB to dig (larger hole)".to_string();
             tb.add_text_with_bg(ammo_x, hbar_y - 4.0, &shovel_hint, 2.5, [0.6, 0.5, 0.3, 1.0], [0.0, 0.0, 0.0, 0.5]);
             tb.add_text(ammo_x, hbar_y + 22.0, "Entrenching Shovel", 1.5, gray);
         } else {
@@ -1100,6 +1193,23 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
         }
     }
 
+    // ---- Interaction prompt (Playing: near citizen; same style as ship war table / talk) ----
+    if state.phase == GamePhase::Playing
+        && !state.dialogue_state.is_open()
+        && state.interaction_prompt.is_some()
+    {
+        if let Some(ref prompt) = state.interaction_prompt {
+            let cx = sw * 0.5;
+            let cy = sh * 0.5;
+            let text = prompt.display_text();
+            let pw = text.len() as f32 * 6.0 * 2.5;
+            let timer = state.time.elapsed_seconds();
+            let flash = (timer * 2.5).sin() * 0.3 + 0.7;
+            tb.add_rect(cx - pw * 0.5 - 6.0, cy + 40.0, pw + 12.0, 30.0, [0.02, 0.03, 0.06, 0.7]);
+            tb.add_text(cx - pw * 0.5, cy + 46.0, &text, 2.5, [0.3 + flash * 0.3, 0.6 + flash * 0.2, 1.0, 1.0]);
+        }
+    }
+
     // ---- Dialogue box (Earth settlement — Starship Troopers style) ----
     if state.dialogue_state.is_open() {
         if let Some((line_text, choices)) = state.dialogue_state.current_line_and_choices() {
@@ -1125,7 +1235,9 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
                 let key = (i + 1).to_string();
                 tb.add_text(box_x + 6.0, box_y + 44.0 + i as f32 * 18.0, &format!("[{}] {}", key, choice_label), 1.0, [0.5, 0.75, 1.0, 1.0]);
             }
-            tb.add_text(sw * 0.5 - 60.0, sh - 14.0, "1-4 = choose  Esc = close", 1.0, gray);
+            let dialogue_prompt = format!("{} = choose  {} = close", DIALOGUE_CHOICE_KEYS, DIALOGUE_CLOSE_KEY);
+            let dpw = dialogue_prompt.len() as f32 * 6.0 * 1.0;
+            tb.add_text(sw * 0.5 - dpw * 0.5, sh - 14.0, &dialogue_prompt, 1.0, gray);
         }
     }
 

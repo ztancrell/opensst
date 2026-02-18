@@ -2,7 +2,7 @@
 
 use engine_core::{Lifetime, Transform, Velocity, Vec3};
 use hecs::World;
-use physics::PhysicsWorld;
+use physics::{ColliderHandle, PhysicsWorld, RigidBodyHandle};
 use rand::prelude::*;
 
 /// A destructible object component.
@@ -44,6 +44,14 @@ impl Destructible {
 #[derive(Debug, Clone, Copy)]
 pub struct Rock;
 
+/// Physics rigid body + collider for destructible environment objects (rocks, landmarks, etc.).
+/// When the entity is despawned, the body must be removed via `PhysicsWorld::remove_body`.
+#[derive(Debug, Clone)]
+pub struct DestructiblePhysics {
+    pub body_handle: RigidBodyHandle,
+    pub collider_handle: ColliderHandle,
+}
+
 /// Bug hole structure: spawns bugs periodically, can be destroyed.
 #[derive(Debug, Clone)]
 pub struct BugHole {
@@ -75,6 +83,14 @@ pub struct HiveStructure;
 /// Cluster of bug eggs (destructible, can hatch bugs when destroyed).
 #[derive(Debug, Clone, Copy)]
 pub struct EggCluster;
+
+/// Large hive tunnel / cave entrance on surface (Minecraft-style hole; spawns bugs, collapses when destroyed).
+#[derive(Debug, Clone, Copy)]
+pub struct HiveTunnelEntrance;
+
+/// Organic nest mound full of eggs (destructible; explodes in goo and chain-reacts).
+#[derive(Debug, Clone, Copy)]
+pub struct HiveNest;
 
 /// Generic biome-specific environment decoration.
 #[derive(Debug, Clone, Copy)]
@@ -226,6 +242,8 @@ pub enum LandmarkType {
     // Caves and abandoned UCF structures (procgen surface variety)
     /// Cave entrance / tunnel mouth in rocky terrain.
     CaveEntrance,
+    /// HiveWorld: large bug-tunnel cave mouth (surface hole, bugs pour out; collapse when destroyed).
+    HiveCaveEntrance,
     /// Abandoned UCF research station — derelict science outpost.
     AbandonedUCFResearchStation,
     /// Abandoned UCF base — ruined military installation.
@@ -304,12 +322,12 @@ pub struct CachedRenderData {
     /// RGBA color.
     pub color: [f32; 4],
     /// Mesh group index (determines which shared mesh to draw with).
-    /// 0=rock, 1=bug_hole, 2=hive_mound, 3=egg_cluster, 4=prop_sphere, 5=cube, 6=landmark, 7=hazard, 8=beveled_cube
+    /// 0=rock, 1=bug_hole, 2=hive_mound, 3=egg_cluster, 4=prop_sphere, 5=cube, 6=landmark, 7=hazard, 8=beveled_cube, 9=hive_cave_entrance
     pub mesh_group: u8,
 }
 
 /// Number of distinct mesh groups for static environment entities.
-pub const ENV_MESH_GROUP_COUNT: usize = 9;
+pub const ENV_MESH_GROUP_COUNT: usize = 10;
 pub const MESH_GROUP_ROCK: u8 = 0;
 pub const MESH_GROUP_BUG_HOLE: u8 = 1;
 pub const MESH_GROUP_HIVE_MOUND: u8 = 2;
@@ -320,6 +338,8 @@ pub const MESH_GROUP_LANDMARK: u8 = 6;
 pub const MESH_GROUP_HAZARD: u8 = 7;
 /// Beveled cube: UCF buildings (industrial, chamfered edges).
 pub const MESH_GROUP_BEVELED_CUBE: u8 = 8;
+/// Hive cave / tunnel entrance: arched surface hole (Minecraft-style).
+pub const MESH_GROUP_HIVE_CAVE_ENTRANCE: u8 = 9;
 
 /// Debris particle component.
 #[derive(Debug, Clone, Copy)]

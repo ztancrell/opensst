@@ -1,6 +1,7 @@
 //! First-person weapon viewmodel animation and shell casing physics.
 
 use glam::{Quat, Vec3};
+use physics::{ColliderHandle, RigidBodyHandle};
 
 /// Shell casing type — matches weapon for persistent, weapon-appropriate shells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,30 +140,33 @@ impl ViewmodelAnimState {
     }
 }
 
-/// An ejected shell casing flying through the air.
+/// An ejected shell casing (rigid body — flies then rests on ground, can roll when kicked).
 pub struct ShellCasing {
     pub position: Vec3,
-    pub velocity: Vec3,
     pub rotation: Quat,
-    pub angular_velocity: Vec3,
+    pub body_handle: RigidBodyHandle,
+    pub collider_handle: ColliderHandle,
     pub lifetime: f32,
     pub size: f32,
     pub shell_type: ShellCasingType,
 }
 
-/// A spent shell casing lying on the ground (persistent).
+/// A spent shell casing on the ground (same rigid body — persistent, can roll).
 pub struct GroundedShellCasing {
     pub position: Vec3,
     pub rotation: Quat,
     pub scale: Vec3,
     pub shell_type: ShellCasingType,
+    pub body_handle: RigidBodyHandle,
+    pub collider_handle: ColliderHandle,
 }
 
 impl GroundedShellCasing {
+    /// Create from a flying casing when it has settled; keeps the same physics body.
     pub fn from_flying(casing: &ShellCasing) -> Self {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        let (base_scale, tilt) = match casing.shell_type {
+        let (base_scale, _tilt) = match casing.shell_type {
             ShellCasingType::Rifle => (Vec3::new(0.006, 0.018, 0.006), 0.2),
             ShellCasingType::Shotgun => (Vec3::new(0.012, 0.028, 0.012), 0.3),
             ShellCasingType::Sniper => (Vec3::new(0.008, 0.025, 0.008), 0.25),
@@ -171,14 +175,13 @@ impl GroundedShellCasing {
             ShellCasingType::Flamethrower => (Vec3::new(0.005, 0.012, 0.005), 0.15),
         };
         let jitter = 0.85 + rng.gen::<f32>() * 0.3;
-        let rot_y = rng.gen::<f32>() * std::f32::consts::TAU;
-        let rot_x = (rng.gen::<f32>() - 0.5) * tilt;
-        let rot_z = (rng.gen::<f32>() - 0.5) * tilt * 0.8;
         Self {
             position: casing.position,
-            rotation: Quat::from_euler(glam::EulerRot::XYZ, rot_x, rot_y, rot_z),
+            rotation: casing.rotation,
             scale: base_scale * jitter,
             shell_type: casing.shell_type,
+            body_handle: casing.body_handle,
+            collider_handle: casing.collider_handle,
         }
     }
 }

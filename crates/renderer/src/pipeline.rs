@@ -2,12 +2,13 @@
 
 use crate::{Texture, Vertex, InstanceData, CelestialBodyInstance};
 
-/// Creates the main render pipeline with instancing support.
+/// Creates the main render pipeline with instancing support. Shadow is bind group 2.
 pub fn create_render_pipeline(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
     camera_bind_group_layout: &wgpu::BindGroupLayout,
     texture_bind_group_layout: &wgpu::BindGroupLayout,
+    shadow_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Main Shader"),
@@ -16,7 +17,7 @@ pub fn create_render_pipeline(
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Render Pipeline Layout"),
-        bind_group_layouts: &[camera_bind_group_layout, texture_bind_group_layout],
+        bind_group_layouts: &[camera_bind_group_layout, texture_bind_group_layout, shadow_bind_group_layout],
         push_constant_ranges: &[],
     });
 
@@ -66,11 +67,13 @@ pub fn create_render_pipeline(
 }
 
 /// Viewmodel pipeline: no depth test/write so gun always draws on top (no stray geometry on it).
+/// Uses main.wgsl which requires camera (0), texture (1), and shadow (2) bind groups.
 pub fn create_viewmodel_pipeline(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
     camera_bind_group_layout: &wgpu::BindGroupLayout,
     texture_bind_group_layout: &wgpu::BindGroupLayout,
+    shadow_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Main Shader (Viewmodel)"),
@@ -79,7 +82,7 @@ pub fn create_viewmodel_pipeline(
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Viewmodel Pipeline Layout"),
-        bind_group_layouts: &[camera_bind_group_layout, texture_bind_group_layout],
+        bind_group_layouts: &[camera_bind_group_layout, texture_bind_group_layout, shadow_bind_group_layout],
         push_constant_ranges: &[],
     });
 
@@ -186,15 +189,32 @@ pub fn create_terrain_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGrou
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
         ],
     })
 }
 
-/// Create terrain render pipeline (triplanar procedural shader).
+/// Create terrain render pipeline (triplanar procedural shader). Shadow is bind group 1.
 pub fn create_terrain_pipeline(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
     terrain_bind_group_layout: &wgpu::BindGroupLayout,
+    shadow_bind_group_layout: &wgpu::BindGroupLayout,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Terrain Shader"),
@@ -203,7 +223,7 @@ pub fn create_terrain_pipeline(
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Terrain Pipeline Layout"),
-        bind_group_layouts: &[terrain_bind_group_layout],
+        bind_group_layouts: &[terrain_bind_group_layout, shadow_bind_group_layout],
         push_constant_ranges: &[],
     });
 
@@ -856,6 +876,176 @@ pub fn create_blur_pipeline(
             conservative: false,
         },
         depth_stencil: None,
+        multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+        multiview: None,
+        cache: None,
+    })
+}
+
+// =============================================================================
+// SHADOW MAPPING (directional light, depth-only pass)
+// =============================================================================
+
+/// Bind group layout for shadow pass (depth-only): uniform only. Used by terrain_shadow and main_shadow pipelines.
+pub fn create_shadow_pass_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Shadow Pass Bind Group Layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+/// Bind group layout for sampling shadow map in main/terrain: uniform + depth texture + comparison sampler.
+pub fn create_shadow_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Shadow Bind Group Layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Depth-only pipeline for terrain shadow pass. Uses same vertex layout as terrain (position, normal, uv, color).
+pub fn create_terrain_shadow_pipeline(
+    device: &wgpu::Device,
+    shadow_pass_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Shadow Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow.wgsl").into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Terrain Shadow Pipeline Layout"),
+        bind_group_layouts: &[shadow_pass_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Terrain Shadow Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_terrain"),
+            buffers: &[Vertex::layout_with_color()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_terrain"),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: Texture::DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Depth-only pipeline for instanced meshes (bugs, props) shadow pass.
+pub fn create_main_shadow_pipeline(
+    device: &wgpu::Device,
+    shadow_pass_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Shadow Shader (Instanced)"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow.wgsl").into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Main Shadow Pipeline Layout"),
+        bind_group_layouts: &[shadow_pass_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Main Shadow Pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_instanced"),
+            buffers: &[Vertex::layout(), InstanceData::layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_instanced"),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: Texture::DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
         multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
         multiview: None,
         cache: None,

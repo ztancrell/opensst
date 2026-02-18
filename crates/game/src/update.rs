@@ -25,6 +25,7 @@ use crate::artillery::{ArtilleryBarrage, ArtilleryMuzzleFlash, ArtilleryShell, A
 use crate::tac_fighter::{TacBomb, TacFighter, TacFighterPhase};
 use engine_core::{Health, Lifetime, Transform};
 
+use crate::state::{InteractPrompt, WeatherState, INTERACT_KEY};
 use crate::{GamePhase, GameState, SupplyCrate};
 
 /// Run one frame of gameplay update. Called from `GameState::update_gameplay()`.
@@ -143,9 +144,8 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
     } else if state.phase == GamePhase::Playing
         && state.current_planet_idx.is_some()
         && state.settlement_center.is_some()
-        && state.input.is_key_pressed(KeyCode::KeyE)
     {
-        // Find nearest citizen within 3m and open dialogue
+        // Find nearest citizen within 3m: set interaction prompt every frame, open dialogue on E
         const TALK_RANGE_SQ: f32 = 3.0 * 3.0;
         let mut nearest: Option<(Entity, f32, String, usize)> = None;
         for (entity, (transform, citizen)) in state.world.query::<(&Transform, &Citizen)>().iter() {
@@ -157,8 +157,39 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
             }
         }
         if let Some((entity, _, name, dialogue_id)) = nearest {
+            state.interaction_prompt = Some(InteractPrompt {
+                key: INTERACT_KEY,
+                action: format!("Talk to {}", name),
+            });
+            if state.input.is_key_pressed(KeyCode::KeyE) {
+                state.dialogue_state = DialogueState::Open {
+                    speaker_entity: Some(entity),
+                    speaker_name: name,
+                    dialogue_id,
+                    node_index: 0,
+                    showing_choices: true,
+                };
+            }
+        }
+    } else if state.phase == GamePhase::InShip
+        && !state.dialogue_state.is_open()
+        && state.input.is_key_pressed(KeyCode::KeyE)
+    {
+        // Find nearest Roger Young crew NPC within 3m and open dialogue
+        const TALK_RANGE_SQ: f32 = 3.0 * 3.0;
+        let cam_pos = state.camera.position();
+        let mut nearest: Option<(f32, String, usize)> = None;
+        for npc in crate::roger_young_interior_npcs() {
+            let dist_sq = npc.position.distance_squared(cam_pos);
+            if dist_sq < TALK_RANGE_SQ {
+                if nearest.as_ref().map(|(d, _, _)| *d > dist_sq).unwrap_or(true) {
+                    nearest = Some((dist_sq, npc.name.to_string(), npc.dialogue_id));
+                }
+            }
+        }
+        if let Some((_, name, dialogue_id)) = nearest {
             state.dialogue_state = DialogueState::Open {
-                speaker_entity: entity,
+                speaker_entity: None,
                 speaker_name: name,
                 dialogue_id,
                 node_index: 0,
@@ -255,9 +286,11 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
     state.process_dying_bugs();
 
     // ---- Ground tracks (footprints in snow/sand — Dune / Helldivers 2 style) ----
+    let tracks_biome = GameState::biome_has_snow_or_sand(state.planet.primary_biome);
+    let tracks_snow_weather = state.weather.current == WeatherState::Snow;
     if state.current_planet_idx.is_some()
         && state.phase == GamePhase::Playing
-        && GameState::biome_has_snow_or_sand(state.planet.primary_biome)
+        && (tracks_biome || tracks_snow_weather)
     {
         state.emit_ground_tracks(dt);
     }
@@ -356,7 +389,8 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
 
     // Ambient dust particles (only on planet surface)
     if state.current_planet_idx.is_some() && state.player.is_alive {
-        state.ambient_dust.update(dt, state.camera.position());
+        let dust_mult = 1.0 + state.weather.dust * 2.5; // more floating particles when cloudy/rain/snow
+        state.ambient_dust.update(dt, state.camera.position(), dust_mult);
         // Biome-specific volumetric atmosphere (fog banks, embers, spores, etc.)
         state.biome_atmosphere.update(dt, state.camera.position(), state.time.elapsed_seconds());
     }
@@ -1241,63 +1275,69 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
         state.viewmodel_anim.update(dt, is_firing, is_sprinting, is_moving, h_speed);
     }
 
-    // ---- Shell casing physics: fly, settle, then persist as grounded ----
+    // ---- Shell casing physics: rigid bodies — fly, settle, then persist as grounded (can roll when kicked) ----
     const MAX_FLYING_CASINGS: usize = 60;
     if state.shell_casings.len() > MAX_FLYING_CASINGS {
-        state.shell_casings.drain(0..(state.shell_casings.len() - MAX_FLYING_CASINGS));
+        let n_remove = state.shell_casings.len() - MAX_FLYING_CASINGS;
+        for i in 0..n_remove {
+            state.physics.remove_body(state.shell_casings[i].body_handle);
+        }
+        state.shell_casings.drain(0..n_remove);
     }
-    const MAX_GROUNDED_CASINGS: usize = 180;
+    const MAX_GROUNDED_CASINGS: usize = 350;
     if state.grounded_shell_casings.len() > MAX_GROUNDED_CASINGS {
-        state.grounded_shell_casings.drain(0..(state.grounded_shell_casings.len() - MAX_GROUNDED_CASINGS));
+        let n_remove = state.grounded_shell_casings.len() - MAX_GROUNDED_CASINGS;
+        for i in 0..n_remove {
+            state.physics.remove_body(state.grounded_shell_casings[i].body_handle);
+        }
+        state.grounded_shell_casings.drain(0..n_remove);
     }
 
+    // Sync flying casings from physics and detect settled
     let mut to_grounded: Vec<usize> = Vec::new();
     for (i, casing) in state.shell_casings.iter_mut().enumerate() {
         casing.lifetime -= dt;
-        let is_in_water = state.chunk_manager.is_in_water(casing.position.x, casing.position.z);
-        let water_level = state.chunk_manager.water_level();
-        if let Some(wl) = water_level.filter(|_| is_in_water) {
-            let depth = wl - casing.position.y;
-            if depth > 0.0 {
-                casing.velocity.y += 8.0 * dt; // brass floats slightly
-            }
-            casing.velocity *= 1.0 - 4.0 * dt; // water drag
-        } else {
-            casing.velocity += Vec3::new(0.0, -15.0, 0.0) * dt; // gravity
-            casing.velocity *= 1.0 - 2.0 * dt; // air drag
+        if let Some(transform) = state.physics.get_body_transform(casing.body_handle) {
+            casing.position = transform.position;
+            casing.rotation = transform.rotation;
         }
-        casing.position += casing.velocity * dt;
-
-        // Tumble rotation
-        let ang = casing.angular_velocity * dt;
-        casing.rotation = casing.rotation * glam::Quat::from_euler(
-            glam::EulerRot::XYZ, ang.x, ang.y, ang.z,
-        );
-        casing.angular_velocity *= 1.0 - 3.0 * dt; // angular drag
-
-        // Bounce off terrain / float at water surface
-        let surface_y = state.chunk_manager.walkable_height(casing.position.x, casing.position.z);
-        if casing.position.y < surface_y + 0.01 {
-            casing.position.y = surface_y + 0.01;
-            casing.velocity.y = casing.velocity.y.abs() * 0.3; // bounce
-            casing.velocity.x *= 0.5; // friction
-            casing.velocity.z *= 0.5;
-            casing.angular_velocity *= 0.5;
-            // Settled on ground — convert to persistent grounded shell
-            if casing.velocity.length_squared() < 0.15 && casing.lifetime > 0.5 {
-                to_grounded.push(i);
-            }
+        let vel_sq = state
+            .physics
+            .get_body_linvel(casing.body_handle)
+            .map(|v| v.length_squared())
+            .unwrap_or(0.0);
+        if vel_sq < 0.15 && casing.lifetime > 0.5 {
+            to_grounded.push(i);
         }
     }
-    // Move settled casings to grounded (reverse order to preserve indices)
     for &i in to_grounded.iter().rev() {
         let casing = state.shell_casings.remove(i);
         state.grounded_shell_casings.push(GroundedShellCasing::from_flying(&casing));
     }
-    state.shell_casings.retain(|c| c.lifetime > 0.0);
+    // Remove expired flying casings (and their bodies)
+    let mut expired = Vec::new();
+    for (i, c) in state.shell_casings.iter().enumerate() {
+        if c.lifetime <= 0.0 {
+            expired.push(i);
+        }
+    }
+    for &i in expired.iter().rev() {
+        state.physics.remove_body(state.shell_casings[i].body_handle);
+        state.shell_casings.remove(i);
+    }
+
+    // Sync grounded casings from physics for rendering
+    for s in state.grounded_shell_casings.iter_mut() {
+        if let Some(transform) = state.physics.get_body_transform(s.body_handle) {
+            s.position = transform.position;
+            s.rotation = transform.rotation;
+        }
+    }
 
     // Rain drops
     state.update_rain(dt);
+    // Snow particles (when weather is Snow)
+    state.update_snow(dt);
 
     // Destructible debris physics (with water buoyancy)
     let surface_fn = |x: f32, z: f32| {

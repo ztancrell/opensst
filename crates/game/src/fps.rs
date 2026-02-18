@@ -544,9 +544,10 @@ impl CombatSystem {
         let skinny_query = world.query_one::<(&Transform, &mut Health, &Skinny)>(hit_entity);
         if let Ok(mut query) = skinny_query {
             if let Some((transform, health, skinny)) = query.get() {
+                // Unit mesh height ~1.34; head is top ~9% (y 0.76–0.88). Headshot = top of scaled height.
                 let hit_height = hit_position.y - transform.position.y;
-                let skinny_height = transform.scale.y;
-                let is_headshot = hit_height > skinny_height * 0.7;
+                let skinny_world_height = transform.scale.y * 1.34;
+                let is_headshot = hit_height > skinny_world_height * 0.82;
 
                 let mut damage = weapon.damage;
                 if is_headshot {
@@ -555,7 +556,7 @@ impl CombatSystem {
 
                 health.take_damage(damage);
                 let was_kill = health.is_dead();
-                let victim_name = format!("Skinny {:?}", skinny.skinny_type);
+                let victim_name = skinny.skinny_type.display_name().to_string();
 
                 player.damage_dealt += damage;
                 if was_kill {

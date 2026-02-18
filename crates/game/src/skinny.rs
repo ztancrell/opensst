@@ -38,21 +38,30 @@ impl SkinnyType {
         }
     }
 
-    /// Scale for rendering (humanoid: taller than wide).
+    /// Scale for rendering (Heinlein: tall, gaunt — mesh is already elongated; scale preserves silhouette).
     pub fn scale(&self) -> Vec3 {
         match self {
-            SkinnyType::Grunt => Vec3::new(0.35, 1.0, 0.25),
-            SkinnyType::Sniper => Vec3::new(0.3, 0.95, 0.22),
-            SkinnyType::Officer => Vec3::new(0.45, 1.15, 0.35),
+            SkinnyType::Grunt => Vec3::new(0.38, 1.02, 0.28),
+            SkinnyType::Sniper => Vec3::new(0.32, 0.98, 0.24),
+            SkinnyType::Officer => Vec3::new(0.48, 1.12, 0.32),
         }
     }
 
-    /// Color [r, g, b, a] — Skinnies are grey-green humanoids.
+    /// Color [r, g, b, a] — Heinlein Skinnies: sallow, grey-green, sickly (subjugated species).
     pub fn color(&self) -> [f32; 4] {
         match self {
-            SkinnyType::Grunt => [0.45, 0.52, 0.42, 1.0],
-            SkinnyType::Sniper => [0.40, 0.48, 0.38, 1.0],
-            SkinnyType::Officer => [0.38, 0.44, 0.35, 1.0],
+            SkinnyType::Grunt => [0.42, 0.48, 0.40, 1.0],
+            SkinnyType::Sniper => [0.38, 0.44, 0.36, 1.0],
+            SkinnyType::Officer => [0.35, 0.40, 0.32, 1.0],
+        }
+    }
+
+    /// Display name for HUD, scan, hit feedback (e.g. "Skinny Grunt").
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            SkinnyType::Grunt => "Skinny Grunt",
+            SkinnyType::Sniper => "Skinny Sniper",
+            SkinnyType::Officer => "Skinny Officer",
         }
     }
 }

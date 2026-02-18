@@ -109,6 +109,31 @@ impl DebugSettings {
     }
 }
 
+// ── Interaction prompts (single source of truth for key labels; overlay renders dynamically) ──
+
+/// Key label shown in prompts (e.g. "E", "SPACE"). Change here to update all interact prompts.
+pub const INTERACT_KEY: &str = "E";
+/// Key for deploy / launch actions.
+pub const DEPLOY_KEY: &str = "SPACE";
+/// Keys for dialogue choices (shown when dialogue is open).
+pub const DIALOGUE_CHOICE_KEYS: &str = "1-4";
+/// Key to close dialogue.
+pub const DIALOGUE_CLOSE_KEY: &str = "Esc";
+
+/// One on-screen interaction prompt: "[key] action" (e.g. "[E] Talk to Johnny Rico").
+#[derive(Debug, Clone)]
+pub struct InteractPrompt {
+    pub key: &'static str,
+    pub action: String,
+}
+
+impl InteractPrompt {
+    /// Build the full prompt string for overlay (e.g. "[E] ACCESS WAR TABLE").
+    pub fn display_text(&self) -> String {
+        format!("[{}] {}", self.key, self.action)
+    }
+}
+
 /// Game phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamePhase {
@@ -220,6 +245,7 @@ pub(crate) enum WeatherState {
     Cloudy,
     Rain,
     Storm,
+    Snow,
 }
 
 /// Smooth weather that blends between states.
@@ -256,6 +282,7 @@ impl Weather {
             WeatherState::Cloudy,
             WeatherState::Rain,
             WeatherState::Storm,
+            WeatherState::Snow,
         ];
         let idx = rng.gen_range(0..states.len());
         let state = states[idx];
@@ -278,7 +305,29 @@ impl Weather {
             WeatherState::Cloudy => (0.55, 0.08, 0.0003),
             WeatherState::Rain   => (0.80, 0.15, 0.0008),
             WeatherState::Storm  => (0.95, 0.25, 0.0015),
+            WeatherState::Snow   => (0.70, 0.12, 0.0005),
         }
+    }
+
+    /// Sky color tint for current weather (blended during transition). Multiply with planet atmosphere for moody sky.
+    pub fn atmosphere_tint(&self) -> [f32; 3] {
+        let tint_for = |s: WeatherState| -> [f32; 3] {
+            match s {
+                WeatherState::Clear  => [1.0, 1.0, 1.0],
+                WeatherState::Cloudy => [0.82, 0.84, 0.88],
+                WeatherState::Rain   => [0.55, 0.60, 0.72],
+                WeatherState::Storm  => [0.40, 0.44, 0.52],
+                WeatherState::Snow   => [0.78, 0.82, 0.92],
+            }
+        };
+        let a = tint_for(self.current);
+        let b = tint_for(self.target);
+        let t = self.blend;
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
     }
 
     pub fn update(&mut self, dt: f32) {
@@ -311,8 +360,9 @@ impl Weather {
                 WeatherState::Cloudy => {
                     let r = rand::random::<f32>();
                     if r < 0.3 { WeatherState::Clear }
-                    else if r < 0.7 { WeatherState::Cloudy }
-                    else { WeatherState::Rain }
+                    else if r < 0.65 { WeatherState::Cloudy }
+                    else if r < 0.85 { WeatherState::Rain }
+                    else { WeatherState::Snow }
                 }
                 WeatherState::Rain => {
                     let r = rand::random::<f32>();
@@ -323,18 +373,47 @@ impl Weather {
                 WeatherState::Storm => {
                     if rand::random::<f32>() < 0.6 { WeatherState::Rain } else { WeatherState::Storm }
                 }
+                WeatherState::Snow => {
+                    let r = rand::random::<f32>();
+                    if r < 0.5 { WeatherState::Cloudy }
+                    else if r < 0.8 { WeatherState::Snow }
+                    else { WeatherState::Rain }
+                }
             };
             self.hold_timer = 20.0 + rand::random::<f32>() * 40.0;
         }
     }
 
+    /// Spawn rate (per frame) and fall speed for rain. Only active when current/target is Rain or Storm.
     pub fn rain_params(&self) -> (u32, f32) {
-        let rain_amount = ((self.cloud_density - 0.65) / 0.35).clamp(0.0, 1.0);
+        let rain_amount = match (self.current, self.target) {
+            (WeatherState::Rain, _) | (_, WeatherState::Rain) | (WeatherState::Storm, _) | (_, WeatherState::Storm) => {
+                ((self.cloud_density - 0.5) / 0.5).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
         if rain_amount < 0.01 {
             (0, 0.0)
         } else {
-            let spawn_rate = (rain_amount * 150.0) as u32;
-            let fall_speed = 20.0 + rain_amount * 20.0;
+            let spawn_rate = (rain_amount * 120.0) as u32;
+            let fall_speed = 18.0 + rain_amount * 25.0;
+            (spawn_rate, fall_speed)
+        }
+    }
+
+    /// Spawn rate (per frame) and fall speed for snow. Only active when current/target is Snow.
+    pub fn snow_params(&self) -> (u32, f32) {
+        let snow_amount = match (self.current, self.target) {
+            (WeatherState::Snow, _) | (_, WeatherState::Snow) => {
+                ((self.cloud_density - 0.45) / 0.35).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        if snow_amount < 0.01 {
+            (0, 0.0)
+        } else {
+            let spawn_rate = (snow_amount * 80.0) as u32;
+            let fall_speed = 3.0 + snow_amount * 4.0;
             (spawn_rate, fall_speed)
         }
     }

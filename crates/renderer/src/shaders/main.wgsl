@@ -18,6 +18,22 @@ var t_albedo: texture_2d<f32>;
 @group(1) @binding(1)
 var s_albedo: sampler;
 
+struct ShadowUniform {
+    light_view_proj: mat4x4<f32>,
+    camera_pos: vec3<f32>,
+    planet_radius: f32,
+    _pad: vec3<f32>,
+}
+
+@group(2) @binding(0)
+var<uniform> shadow: ShadowUniform;
+
+@group(2) @binding(1)
+var shadow_tex: texture_depth_2d;
+
+@group(2) @binding(2)
+var shadow_sampler: sampler_comparison;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -111,7 +127,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndotl = max(dot(in.world_normal, light_dir), 0.0);
     let half_lambert = ndotl * 0.7 + 0.3;
     let toon_lambert = floor(half_lambert * 3.0 + 0.5) / 3.0;
-    let diffuse = light_color * toon_lambert * 0.85;
+    var diffuse = light_color * toon_lambert * 0.85;
+
+    // Shadow map: sample sun shadow
+    let light_clip = shadow.light_view_proj * vec4<f32>(in.world_position, 1.0);
+    let light_ndc = light_clip.xyz / light_clip.w;
+    let shadow_uv = light_ndc.xy * 0.5 + 0.5;
+    let depth_compare = light_ndc.z * 0.5 + 0.5 + 0.002;
+    let in_bounds = all(shadow_uv >= vec2<f32>(0.0)) && all(shadow_uv <= vec2<f32>(1.0));
+    let shadow_factor = select(1.0, textureSampleCompare(shadow_tex, shadow_sampler, shadow_uv, depth_compare), in_bounds);
+    diffuse *= shadow_factor;
 
     // View direction for specular and rim
     let view_dir = normalize(camera.position.xyz - in.world_position);

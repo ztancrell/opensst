@@ -10,8 +10,9 @@ mod update;
 
 pub use state::{DropPhase, GameMessage, GameMessages, GamePhase, SupplyCrate};
 use state::{
-    ApproachFlightState, DebugSettings, DropPodSequence, KillStreakTracker, ScreenShake,
-    SquadDropSequence, SquadPod, WarpSequence, Weather, WeatherState,
+    ApproachFlightState, DebugSettings, DropPodSequence, InteractPrompt, KillStreakTracker,
+    ScreenShake, SquadDropSequence, WarpSequence, Weather,
+    DEPLOY_KEY, INTERACT_KEY,
 };
 mod authored_bug_meshes;
 mod authored_env_meshes;
@@ -63,15 +64,15 @@ use skinny::{Skinny, SkinnyType};
 use bug_entity::{DeathPhase, EffectsManager, GoreType, PhysicsBug, TrackKind, update_bug_physics};
 use destruction::{
     AbandonedOutpost, BiomeDestructible, BiomeLandmark, BonePile, BugCorpse, BugHole, BurnCrater,
-    CachedRenderData, ChainEffect, ChainReaction, CrashedShip, Debris, Destructible, DestructionSystem,
-    EggCluster, EnvironmentProp, EnvironmentalHazard, HazardPool, HazardType, HiveStructure,
-    LandmarkType, Rock, SporeTower,
+    CachedRenderData, ChainEffect, ChainReaction, CrashedShip, Debris, Destructible, DestructiblePhysics,
+    DestructionSystem, EggCluster, EnvironmentProp, EnvironmentalHazard, HazardPool, HazardType,
+    HiveStructure, HiveNest, HiveTunnelEntrance, LandmarkType, Rock, SporeTower,
     ENV_MESH_GROUP_COUNT, MESH_GROUP_ROCK, MESH_GROUP_BUG_HOLE, MESH_GROUP_HIVE_MOUND,
     MESH_GROUP_EGG_CLUSTER, MESH_GROUP_PROP_SPHERE, MESH_GROUP_CUBE,
-    MESH_GROUP_LANDMARK, MESH_GROUP_HAZARD,
+    MESH_GROUP_LANDMARK, MESH_GROUP_HAZARD, MESH_GROUP_HIVE_CAVE_ENTRANCE,
 };
 use biome_features::get_biome_feature_table;
-use effects::{AmbientDust, DustShape, RainDrop, TracerProjectile};
+use effects::{AmbientDust, DustShape, RainDrop, SnowParticle, TracerProjectile};
 use extraction::{ExtractionDropship, ExtractionMessage, ExtractionPhase, roger_young_parts};
 use horde_ai::apply_separation;
 use fps::{BugCombatSystem, CombatSystem, FPSPlayer, MissionState, PlayerClass};
@@ -110,6 +111,9 @@ pub struct GameState {
 
     /// Heightfield for terrain deformation (footprints in snow/sand). 256x256 f32s, world follows player.
     deformation_buffer: Vec<f32>,
+    /// Snow accumulation (weather-driven). 256x256 f32s, same layout as deformation; center of 128m tile.
+    snow_accumulation_buffer: Vec<f32>,
+    snow_accumulation_origin: (f32, f32),
 
     // Effects
     effects: EffectsManager,
@@ -143,6 +147,8 @@ pub struct GameState {
     galaxy_map_open: bool,
     galaxy_map_selected: usize,
     warp_sequence: Option<WarpSequence>,
+    /// Galaxy position when warp started (for FTL interpolation so Roger Young "moves" to target system).
+    warp_start_galaxy_position: Option<DVec3>,
     /// When true, warp completion returns to ship interior (FTL from war table) instead of space.
     warp_return_to_ship: bool,
 
@@ -171,11 +177,14 @@ pub struct GameState {
     /// Building cuboid colliders on Earth (removed when leaving Earth).
     earth_building_colliders: Vec<ColliderHandle>,
     dialogue_state: DialogueState,
+    /// Current interact prompt (war table, drop bay, talk to NPC). Set each frame; overlay draws same style for all.
+    pub(crate) interaction_prompt: Option<InteractPrompt>,
 
     // Sky and weather (dynamic)
     time_of_day: f32,       // 0 = dawn, 0.25 = noon, 0.5 = dusk, 0.75 = night
     weather: Weather,
     rain_drops: Vec<RainDrop>,
+    snow_particles: Vec<SnowParticle>,
 
     // Destructible environment
     destruction: DestructionSystem,
@@ -185,8 +194,12 @@ pub struct GameState {
 
     // Game state
     phase: GamePhase,
-    /// Main menu selection: 0 = Play, 1 = Quit.
+    /// Main menu selection: 0 = Continue/Play, 1 = Universe Map, 2 = Quit.
     main_menu_selected: usize,
+    /// When true, main menu is showing the galaxy map; Enter = travel to selected system and board ship.
+    main_menu_galaxy_open: bool,
+    /// True if a saved campaign was loaded (show "Continue" instead of "Play").
+    has_save: bool,
     /// When Paused: 0 = Resume, 1 = Quit to main menu.
     pause_menu_selected: usize,
     /// Phase to restore when resuming from Paused.
@@ -215,6 +228,8 @@ pub struct GameState {
     last_player_track_pos: Option<Vec3>,
     ground_track_bug_timer: f32,
     squad_track_last: HashMap<Entity, Vec3>,
+    /// Seconds until next shovel dig allowed (hold LMB to dig repeatedly).
+    shovel_dig_cooldown: f32,
 
     // Cinematic effects
     screen_shake: ScreenShake,
@@ -637,12 +652,14 @@ pub(crate) enum InteriorNPCKind {
 /// One NPC placed in the ship interior. Position in CIC/local space; facing = Y-axis yaw (radians).
 /// color_tint multiplies RGB for lived-in variation (e.g. [0.95, 0.97, 1.0] = slight blue, [0.9, 0.88, 0.92] = worn).
 pub(crate) struct InteriorNPC {
-    position: Vec3,
-    facing_yaw_rad: f32,
-    kind: InteriorNPCKind,
-    color_tint: [f32; 3],
-    /// Display name for nametag when player looks at this NPC.
-    name: &'static str,
+    pub(crate) position: Vec3,
+    pub(crate) facing_yaw_rad: f32,
+    pub(crate) kind: InteriorNPCKind,
+    pub(crate) color_tint: [f32; 3],
+    /// Display name for nametag when player looks at this NPC
+    pub(crate) name: &'static str,
+    /// Index into dialogue_content (dialogue.rs): 5=Fleet, 6=FleetOfficer, 7=MobileInfantry, 8=Marauder, 9=Johnny Rico.
+    pub(crate) dialogue_id: usize,
 }
 
 /// One primitive of an NPC (local offset from NPC base, scale, color, mesh_type).
@@ -706,28 +723,35 @@ pub(crate) fn interior_npc_parts(kind: InteriorNPCKind) -> Vec<InteriorNPCPart> 
     }
 }
 
+/// Dialogue IDs for ship crew (must match dialogue_content in dialogue.rs): 5=Fleet, 6=FleetOfficer, 7=MI, 8=Marauder, 9=Rico.
+const DIALOGUE_FLEET: usize = 5;
+const DIALOGUE_FLEET_OFFICER: usize = 6;
+const DIALOGUE_MI: usize = 7;
+const DIALOGUE_MARAUDER: usize = 8;
+const DIALOGUE_RICO: usize = 9;
+
 /// NPCs placed around the Roger Young CIC, corridor, and drop bay. Tints give lived-in variation.
 pub(crate) fn roger_young_interior_npcs() -> Vec<InteriorNPC> {
     use InteriorNPCKind::*;
     vec![
         // ── CIC: Fleet at helm ──
-        InteriorNPC { position: Vec3::new(-2.0, 0.0, 12.2), facing_yaw_rad: 0.0, kind: FleetOfficer, color_tint: [0.97, 0.98, 1.02], name: "Lt. Parks" },
-        InteriorNPC { position: Vec3::new(2.0, 0.0, 12.2), facing_yaw_rad: 0.0, kind: FleetOfficer, color_tint: [0.98, 0.97, 1.01], name: "Ensign Levy" },
+        InteriorNPC { position: Vec3::new(-2.0, 0.0, 12.2), facing_yaw_rad: 0.0, kind: FleetOfficer, color_tint: [0.97, 0.98, 1.02], name: "Lt. Parks", dialogue_id: DIALOGUE_FLEET_OFFICER },
+        InteriorNPC { position: Vec3::new(2.0, 0.0, 12.2), facing_yaw_rad: 0.0, kind: FleetOfficer, color_tint: [0.98, 0.97, 1.01], name: "Ensign Levy", dialogue_id: DIALOGUE_FLEET_OFFICER },
         // Fleet at consoles
-        InteriorNPC { position: Vec3::new(-8.5, 0.0, -5.0), facing_yaw_rad: std::f32::consts::FRAC_PI_2, kind: Fleet, color_tint: [1.02, 1.0, 0.98], name: "Ops Specialist Chen" },
-        InteriorNPC { position: Vec3::new(8.5, 0.0, -5.0), facing_yaw_rad: -std::f32::consts::FRAC_PI_2, kind: Fleet, color_tint: [0.96, 0.98, 1.0], name: "Comms Officer Brice" },
+        InteriorNPC { position: Vec3::new(-8.5, 0.0, -5.0), facing_yaw_rad: std::f32::consts::FRAC_PI_2, kind: Fleet, color_tint: [1.02, 1.0, 0.98], name: "Ops Specialist Chen", dialogue_id: DIALOGUE_FLEET },
+        InteriorNPC { position: Vec3::new(8.5, 0.0, -5.0), facing_yaw_rad: -std::f32::consts::FRAC_PI_2, kind: Fleet, color_tint: [0.96, 0.98, 1.0], name: "Comms Officer Brice", dialogue_id: DIALOGUE_FLEET },
         // ── War table ──
-        InteriorNPC { position: Vec3::new(0.0, 0.0, 4.3), facing_yaw_rad: std::f32::consts::PI, kind: JohnnyRico, color_tint: [1.0, 0.98, 0.96], name: "Johnny Rico" },
-        InteriorNPC { position: Vec3::new(-2.7, 0.0, 2.0), facing_yaw_rad: -std::f32::consts::FRAC_PI_2, kind: MobileInfantry, color_tint: [0.92, 0.95, 0.9], name: "Sgt. Zim" },
-        InteriorNPC { position: Vec3::new(2.7, 0.0, 2.0), facing_yaw_rad: std::f32::consts::FRAC_PI_2, kind: MobileInfantry, color_tint: [1.05, 1.02, 0.98], name: "Cpl. Higgins" },
+        InteriorNPC { position: Vec3::new(0.0, 0.0, 4.3), facing_yaw_rad: std::f32::consts::PI, kind: JohnnyRico, color_tint: [1.0, 0.98, 0.96], name: "Johnny Rico", dialogue_id: DIALOGUE_RICO },
+        InteriorNPC { position: Vec3::new(-2.7, 0.0, 2.0), facing_yaw_rad: -std::f32::consts::FRAC_PI_2, kind: MobileInfantry, color_tint: [0.92, 0.95, 0.9], name: "Sgt. Zim", dialogue_id: DIALOGUE_MI },
+        InteriorNPC { position: Vec3::new(2.7, 0.0, 2.0), facing_yaw_rad: std::f32::consts::FRAC_PI_2, kind: MobileInfantry, color_tint: [1.05, 1.02, 0.98], name: "Cpl. Higgins", dialogue_id: DIALOGUE_MI },
         // ── Aft corridor ──
-        InteriorNPC { position: Vec3::new(-1.5, 0.0, -18.0), facing_yaw_rad: 0.0, kind: MobileInfantry, color_tint: [0.88, 0.9, 0.86], name: "Trooper Flores" },
-        InteriorNPC { position: Vec3::new(1.8, 0.0, -19.0), facing_yaw_rad: 0.1, kind: MobileInfantry, color_tint: [1.02, 0.99, 0.97], name: "Trooper Kowalski" },
+        InteriorNPC { position: Vec3::new(-1.5, 0.0, -18.0), facing_yaw_rad: 0.0, kind: MobileInfantry, color_tint: [0.88, 0.9, 0.86], name: "Trooper Flores", dialogue_id: DIALOGUE_MI },
+        InteriorNPC { position: Vec3::new(1.8, 0.0, -19.0), facing_yaw_rad: 0.1, kind: MobileInfantry, color_tint: [1.02, 0.99, 0.97], name: "Trooper Kowalski", dialogue_id: DIALOGUE_MI },
         // ── Drop bay ──
-        InteriorNPC { position: Vec3::new(-2.5, 0.0, -28.5), facing_yaw_rad: 0.0, kind: Marauder, color_tint: [1.0, 0.97, 0.94], name: "Marauder Pilot Acevedo" },
-        InteriorNPC { position: Vec3::new(2.5, 0.0, -28.5), facing_yaw_rad: 0.0, kind: Marauder, color_tint: [0.96, 0.98, 1.0], name: "Marauder Pilot Dienes" },
-        InteriorNPC { position: Vec3::new(0.0, 0.0, -26.0), facing_yaw_rad: -std::f32::consts::FRAC_PI_2, kind: Fleet, color_tint: [0.9, 0.88, 0.86], name: "Tech Martinez" },
-        InteriorNPC { position: Vec3::new(0.0, 0.0, -24.0), facing_yaw_rad: std::f32::consts::PI, kind: MobileInfantry, color_tint: [0.94, 0.92, 0.9], name: "Cpl. Rasczak" },
+        InteriorNPC { position: Vec3::new(-2.5, 0.0, -28.5), facing_yaw_rad: 0.0, kind: Marauder, color_tint: [1.0, 0.97, 0.94], name: "Marauder Pilot Acevedo", dialogue_id: DIALOGUE_MARAUDER },
+        InteriorNPC { position: Vec3::new(2.5, 0.0, -28.5), facing_yaw_rad: 0.0, kind: Marauder, color_tint: [0.96, 0.98, 1.0], name: "Marauder Pilot Dienes", dialogue_id: DIALOGUE_MARAUDER },
+        InteriorNPC { position: Vec3::new(0.0, 0.0, -26.0), facing_yaw_rad: -std::f32::consts::FRAC_PI_2, kind: Fleet, color_tint: [0.9, 0.88, 0.86], name: "Tech Martinez", dialogue_id: DIALOGUE_FLEET },
+        InteriorNPC { position: Vec3::new(0.0, 0.0, -24.0), facing_yaw_rad: std::f32::consts::PI, kind: MobileInfantry, color_tint: [0.94, 0.92, 0.9], name: "Cpl. Rasczak", dialogue_id: DIALOGUE_MI },
     ]
 }
 
@@ -1226,14 +1250,22 @@ struct EnvironmentMeshes {
     crystal: Mesh,
     /// Generic prop sphere (for varied decorations)
     prop_sphere: Mesh,
+    /// Unit quad in XZ (normal Y) for Minecraft-style billboard particles (rain, snow, dust)
+    billboard_quad: Mesh,
     /// Beveled unit cube (UCF buildings — chamfered edges)
     beveled_cube: Mesh,
+    /// Heinlein Skinnies (tall, gaunt humanoid mesh)
+    skinny_mesh: Mesh,
+    /// Hive cave / tunnel entrance (arched surface hole, Minecraft-style)
+    hive_cave_entrance: Mesh,
 }
 
 impl EnvironmentMeshes {
     fn new(device: &wgpu::Device) -> Self {
         let (v, idx) = authored_env_meshes::build_bug_hole();
         let bug_hole = Mesh::from_data(device, &v, &idx);
+        let (v, idx) = authored_env_meshes::build_hive_cave_entrance();
+        let hive_cave_entrance = Mesh::from_data(device, &v, &idx);
         let (v, idx) = authored_env_meshes::build_hive_mound();
         let hive_mound = Mesh::from_data(device, &v, &idx);
         let (v, idx) = authored_env_meshes::build_egg_cluster();
@@ -1248,6 +1280,8 @@ impl EnvironmentMeshes {
         let cube = Mesh::cube(device);
         let (v, idx) = authored_env_meshes::build_beveled_cube();
         let beveled_cube = Mesh::from_data(device, &v, &idx);
+        let (v, idx) = authored_env_meshes::build_skinny();
+        let skinny_mesh = Mesh::from_data(device, &v, &idx);
 
         Self {
             ground: Mesh::plane(device, 200.0),
@@ -1261,7 +1295,10 @@ impl EnvironmentMeshes {
             egg_cluster,
             crystal: Mesh::sphere(device, 1.0, 6, 4),       // Crystal spike (stretched via transform)
             prop_sphere: Mesh::sphere(device, 1.0, 8, 6),   // Generic decoration
+            billboard_quad: Mesh::plane(device, 1.0),      // Camera-facing particle quads (Minecraft style)
             beveled_cube,
+            skinny_mesh,
+            hive_cave_entrance,
         }
     }
 }
@@ -1304,7 +1341,7 @@ impl ChunkManager {
         Self {
             chunks: HashMap::new(),
             chunk_size: 64.0,
-            chunk_resolution: 48, // 48 verts per side (~1.3m cells) – good balance of quality vs perf
+            chunk_resolution: 96, // 96 verts per side (~0.67m cells) – finer detail for shovel/explosion deformation
             view_distance: 3,
             planet_seed,
             height_scale,
@@ -1466,7 +1503,7 @@ impl ChunkManager {
             offset_x: cx as f32 * self.chunk_size,
             offset_z: cz as f32 * self.chunk_size,
             seed: self.planet_seed,
-            water_level: if has_water { Some(0.25) } else { None },
+            water_level: if has_water { Some(0.35) } else { None },
             water_coverage: if has_water { 0.45 } else { 0.0 },
             ..Default::default()
         };
@@ -1543,7 +1580,7 @@ impl ChunkManager {
             .biomes
             .iter()
             .any(|b| procgen::BiomeConfig::from_type(*b).has_water())
-            .then(|| 0.25 * self.height_scale)
+            .then(|| 0.35 * self.height_scale)
     }
 
     /// True if position (x,z) is in a water basin (terrain below water level).
@@ -1792,6 +1829,158 @@ impl ChunkManager {
         out
     }
 
+    /// Flatten terrain inside a circle to a single height (e.g. city core). Returns chunk keys modified.
+    fn flatten_circle(
+        &mut self,
+        center_x: f32,
+        center_z: f32,
+        radius: f32,
+        flat_height: f32,
+    ) -> Vec<(i32, i32)> {
+        let res = self.chunk_resolution as usize;
+        let step = self.chunk_size / (self.chunk_resolution - 1) as f32;
+        let half_size = self.chunk_size * 0.5;
+        let r2 = radius * radius;
+        let min_cx = Self::world_to_chunk(center_x - radius, self.chunk_size);
+        let max_cx = Self::world_to_chunk(center_x + radius, self.chunk_size);
+        let min_cz = Self::world_to_chunk(center_z - radius, self.chunk_size);
+        let max_cz = Self::world_to_chunk(center_z + radius, self.chunk_size);
+        let mut modified = Vec::new();
+        for cz in min_cz..=max_cz {
+            for cx in min_cx..=max_cx {
+                let key = (cx, cz);
+                let Some(chunk) = self.chunks.get_mut(&key) else { continue };
+                let offset_x = cx as f32 * self.chunk_size;
+                let offset_z = cz as f32 * self.chunk_size;
+                let mut any = false;
+                for z in 0..res {
+                    for x in 0..res {
+                        let world_x = offset_x - half_size + x as f32 * step;
+                        let world_z = offset_z - half_size + z as f32 * step;
+                        let dx = world_x - center_x;
+                        let dz = world_z - center_z;
+                        if dx * dx + dz * dz <= r2 {
+                            let idx = z * res + x;
+                            chunk.terrain.heightmap[idx] = flat_height;
+                            chunk.terrain.vertices[idx].position[1] = flat_height;
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    chunk.terrain.recalculate_normals();
+                    modified.push(key);
+                }
+            }
+        }
+        modified
+    }
+
+    /// Flatten terrain in an axis-aligned rectangle to a single height (e.g. building plot).
+    /// Returns chunk keys that were modified (caller should sync edges and rebuild).
+    fn flatten_rect(
+        &mut self,
+        min_x: f32,
+        max_x: f32,
+        min_z: f32,
+        max_z: f32,
+        flat_height: f32,
+    ) -> Vec<(i32, i32)> {
+        let res = self.chunk_resolution as usize;
+        let step = self.chunk_size / (self.chunk_resolution - 1) as f32;
+        let half_size = self.chunk_size * 0.5;
+        let mut modified = Vec::new();
+        // Chunks that overlap the rect
+        let min_cx = Self::world_to_chunk(min_x, self.chunk_size);
+        let max_cx = Self::world_to_chunk(max_x, self.chunk_size);
+        let min_cz = Self::world_to_chunk(min_z, self.chunk_size);
+        let max_cz = Self::world_to_chunk(max_z, self.chunk_size);
+        for cz in min_cz..=max_cz {
+            for cx in min_cx..=max_cx {
+                let key = (cx, cz);
+                let Some(chunk) = self.chunks.get_mut(&key) else { continue };
+                let offset_x = cx as f32 * self.chunk_size;
+                let offset_z = cz as f32 * self.chunk_size;
+                let mut any = false;
+                for z in 0..res {
+                    for x in 0..res {
+                        let world_x = offset_x - half_size + x as f32 * step;
+                        let world_z = offset_z - half_size + z as f32 * step;
+                        if world_x >= min_x && world_x <= max_x && world_z >= min_z && world_z <= max_z {
+                            let idx = z * res + x;
+                            chunk.terrain.heightmap[idx] = flat_height;
+                            chunk.terrain.vertices[idx].position[1] = flat_height;
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    chunk.terrain.recalculate_normals();
+                    modified.push(key);
+                }
+            }
+        }
+        modified
+    }
+
+    /// Flatten terrain in a rotated road segment (center, half extents, rotation) to a single height.
+    fn flatten_road_segment(
+        &mut self,
+        cx: f32,
+        cz: f32,
+        half_len: f32,
+        half_w: f32,
+        rotation_y_rad: f32,
+        flat_height: f32,
+    ) -> Vec<(i32, i32)> {
+        let c = rotation_y_rad.cos();
+        let s = rotation_y_rad.sin();
+        let res = self.chunk_resolution as usize;
+        let step = self.chunk_size / (self.chunk_resolution - 1) as f32;
+        let half_size = self.chunk_size * 0.5;
+        // Axis-aligned bounding box of the rotated rect for chunk range
+        let extent = half_len + half_w;
+        let min_x = cx - extent;
+        let max_x = cx + extent;
+        let min_z = cz - extent;
+        let max_z = cz + extent;
+        let min_cx = Self::world_to_chunk(min_x, self.chunk_size);
+        let max_cx = Self::world_to_chunk(max_x, self.chunk_size);
+        let min_cz = Self::world_to_chunk(min_z, self.chunk_size);
+        let max_cz = Self::world_to_chunk(max_z, self.chunk_size);
+        let mut modified = Vec::new();
+        for cz_key in min_cz..=max_cz {
+            for cx_key in min_cx..=max_cx {
+                let key = (cx_key, cz_key);
+                let Some(chunk) = self.chunks.get_mut(&key) else { continue };
+                let offset_x = cx_key as f32 * self.chunk_size;
+                let offset_z = cz_key as f32 * self.chunk_size;
+                let mut any = false;
+                for z in 0..res {
+                    for x in 0..res {
+                        let world_x = offset_x - half_size + x as f32 * step;
+                        let world_z = offset_z - half_size + z as f32 * step;
+                        let rel_x = world_x - cx;
+                        let rel_z = world_z - cz;
+                        let local_along = rel_x * s + rel_z * c;
+                        let local_across = -rel_x * c + rel_z * s;
+                        if local_along.abs() <= half_len && local_across.abs() <= half_w {
+                            let idx = z * res + x;
+                            chunk.terrain.heightmap[idx] = flat_height;
+                            chunk.terrain.vertices[idx].position[1] = flat_height;
+                            any = true;
+                        }
+                    }
+                }
+                if any {
+                    chunk.terrain.recalculate_normals();
+                    modified.push(key);
+                }
+            }
+        }
+        modified
+    }
+
     /// Rebuild mesh, water mesh, and collider for a chunk after terrain modification.
     fn rebuild_chunk_mesh_and_collider(
         &mut self,
@@ -1868,6 +2057,69 @@ impl ChunkManager {
             }
         }
         // Terrain physics: steep slopes collapse (sand/gravel angle of repose)
+        if !affected_keys.is_empty() {
+            let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
+            let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
+            self.pending_chunk_rebuilds.extend(to_rebuild);
+        }
+    }
+
+    /// Ace of Spades–style blocky dig: one block removed at the cell containing world_pos.
+    /// Rebuilds mesh + collider for affected chunks.
+    fn deform_at_blocky(
+        &mut self,
+        world_pos: Vec3,
+        block_size: f32,
+        device: &wgpu::Device,
+        physics: &mut PhysicsWorld,
+    ) {
+        let radius = block_size;
+        let min_cx = Self::world_to_chunk(world_pos.x - radius, self.chunk_size);
+        let max_cx = Self::world_to_chunk(world_pos.x + radius, self.chunk_size);
+        let min_cz = Self::world_to_chunk(world_pos.z - radius, self.chunk_size);
+        let max_cz = Self::world_to_chunk(world_pos.z + radius, self.chunk_size);
+
+        let mut affected_keys = Vec::new();
+        for cz in min_cz..=max_cz {
+            for cx in min_cx..=max_cx {
+                if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                    if chunk.terrain.deform_crater_blocky(world_pos.x, world_pos.z, block_size) {
+                        affected_keys.push((cx, cz));
+                    }
+                }
+            }
+        }
+        if !affected_keys.is_empty() {
+            let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
+            let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
+            self.pending_chunk_rebuilds.extend(to_rebuild);
+        }
+    }
+
+    /// Blocky mound: raise one block at the cell containing world_pos (excavated dirt pile).
+    fn deform_mound_at_blocky(
+        &mut self,
+        world_pos: Vec3,
+        block_size: f32,
+        device: &wgpu::Device,
+        physics: &mut PhysicsWorld,
+    ) {
+        let radius = block_size;
+        let min_cx = Self::world_to_chunk(world_pos.x - radius, self.chunk_size);
+        let max_cx = Self::world_to_chunk(world_pos.x + radius, self.chunk_size);
+        let min_cz = Self::world_to_chunk(world_pos.z - radius, self.chunk_size);
+        let max_cz = Self::world_to_chunk(world_pos.z + radius, self.chunk_size);
+
+        let mut affected_keys = Vec::new();
+        for cz in min_cz..=max_cz {
+            for cx in min_cx..=max_cx {
+                if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
+                    if chunk.terrain.deform_mound_blocky(world_pos.x, world_pos.z, block_size) {
+                        affected_keys.push((cx, cz));
+                    }
+                }
+            }
+        }
         if !affected_keys.is_empty() {
             let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
             let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
@@ -1968,6 +2220,42 @@ impl ChunkManager {
             }
         }
     }
+
+    /// Render visible terrain chunks into the shadow map. Same culling as render_visible.
+    fn render_visible_shadow(
+        &self,
+        renderer: &Renderer,
+        pass: &mut wgpu::RenderPass,
+        camera: &Camera,
+    ) {
+        let cam_pos = camera.position();
+        let cam_fwd = camera.forward();
+        let cam_fwd_h = Vec3::new(cam_fwd.x, 0.0, cam_fwd.z).normalize_or_zero();
+        let near_dist_sq = (self.chunk_size * 1.5) * (self.chunk_size * 1.5);
+
+        for (&(cx, cz), chunk) in &self.chunks {
+            let chunk_center = Vec3::new(
+                cx as f32 * self.chunk_size,
+                0.0,
+                cz as f32 * self.chunk_size,
+            );
+            let to_chunk = Vec3::new(
+                chunk_center.x - cam_pos.x,
+                0.0,
+                chunk_center.z - cam_pos.z,
+            );
+            let dist_sq = to_chunk.length_squared();
+
+            if dist_sq > near_dist_sq {
+                let dot = to_chunk.normalize_or_zero().dot(cam_fwd_h);
+                if dot < -0.3 {
+                    continue;
+                }
+            }
+
+            renderer.render_terrain_shadow(pass, &chunk.mesh);
+        }
+    }
 }
 
 impl GameState {
@@ -2007,18 +2295,20 @@ impl GameState {
 
         // Generate universe and initial star system (or load persisted galactic war)
         let universe_seed: u64 = 42;
-        let mut universe = Universe::generate(universe_seed, 50);
+        let mut universe = Universe::generate(universe_seed, 100);
         let mut current_system_idx = 0;
         let mut current_system = universe.generate_system(current_system_idx);
         let num_system_planets = current_system.bodies.len();
         let mut war_state_initial = GalacticWarState::new(num_system_planets);
 
         let mut effective_seed = universe_seed;
+        let mut has_save = false;
         if let Some((saved_seed, saved_sys_idx, saved_war)) = load_galactic_war() {
-            universe = Universe::generate(saved_seed, 50);
+            universe = Universe::generate(saved_seed, 100);
             current_system = universe.generate_system(saved_sys_idx);
             current_system_idx = saved_sys_idx;
             effective_seed = saved_seed;
+            has_save = true;
             if saved_war.planets.len() == current_system.bodies.len() {
                 war_state_initial = saved_war;
             }
@@ -2093,6 +2383,8 @@ impl GameState {
             flash_mesh,
             billboard_mesh,
             deformation_buffer: vec![0.0; (DEFORM_TEXTURE_SIZE * DEFORM_TEXTURE_SIZE) as usize],
+            snow_accumulation_buffer: vec![0.0; (DEFORM_TEXTURE_SIZE * DEFORM_TEXTURE_SIZE) as usize],
+            snow_accumulation_origin: (0.0, 0.0),
             effects: EffectsManager::new(),
             player,
             combat: CombatSystem::new(),
@@ -2114,6 +2406,7 @@ impl GameState {
             galaxy_map_open: false,
             galaxy_map_selected: 0,
             warp_sequence: None,
+            warp_start_galaxy_position: None,
             warp_return_to_ship: false,
             drop_pod: None,
             squad_drop_pods: None,
@@ -2128,13 +2421,17 @@ impl GameState {
             earth_road_colliders: Vec::new(),
             earth_building_colliders: Vec::new(),
             dialogue_state: DialogueState::default(),
+            interaction_prompt: None,
             time_of_day: 0.25,  // start at noon
             weather: Weather::new(),
             rain_drops: Vec::new(),
+            snow_particles: Vec::new(),
             destruction: DestructionSystem::new(),
             game_messages: GameMessages::new(),
             phase: GamePhase::MainMenu,
             main_menu_selected: 0,
+            main_menu_galaxy_open: false,
+            has_save,
             pause_menu_selected: 0,
             previous_phase: None,
             running: true,
@@ -2149,6 +2446,7 @@ impl GameState {
             last_player_track_pos: None,
             ground_track_bug_timer: 0.0,
             squad_track_last: HashMap::new(),
+            shovel_dig_cooldown: 0.0,
             screen_shake: ScreenShake::new(),
             camera_recoil: 0.0,
             crouch_hold_timer: 0.0,
@@ -2224,12 +2522,20 @@ impl GameState {
         // Process debug actions (execute one-shot requests)
         self.process_debug_actions();
 
-        // Advance time of day and weather every frame (realtime for sky, terrain, planet-from-orbit)
-        // When on a planet, we update that planet's stored values so each planet has its own cycle
+        // Time of day: when on a planet, derive from orbit so sky/terrain lighting matches Roger Young view
         if !self.debug.freeze_time_of_day {
-            self.time_of_day += dt / 180.0; // Full cycle ~3 min — visible during missions
-            if self.time_of_day >= 1.0 {
-                self.time_of_day -= 1.0;
+            if let Some(planet_idx) = self.current_planet_idx {
+                if let Some(body) = self.current_system.bodies.get(planet_idx) {
+                    let angle = body.orbital_phase as f64 + self.orbital_time * body.orbital_speed as f64;
+                    let angle_norm = (angle / std::f64::consts::TAU).rem_euclid(1.0) as f32;
+                    // Orbital angle 0 = planet at +X, star at -X = dusk (t=0.5); day_length_mult scales cycle
+                    self.time_of_day = (angle_norm * self.planet.day_length_mult + 0.5).rem_euclid(1.0);
+                }
+            } else {
+                self.time_of_day += dt / 180.0;
+                if self.time_of_day >= 1.0 {
+                    self.time_of_day -= 1.0;
+                }
             }
         }
         self.weather.update(dt);
@@ -2241,6 +2547,8 @@ impl GameState {
                 status.weather = self.weather.clone();
             }
         }
+
+        self.interaction_prompt = None;
 
         match self.phase {
             GamePhase::MainMenu => self.update_main_menu(dt),
@@ -2258,6 +2566,26 @@ impl GameState {
         // Sync camera to renderer for phases that update it in their update (DropSequence does its own).
         if self.phase == GamePhase::DropSequence {
             self.renderer.update_camera(&self.camera, self.planet_radius_for_curvature());
+        }
+
+        // Dialogue input: run every frame when dialogue is open (ship or Earth) so Escape and 1–4 work in both.
+        if self.dialogue_state.is_open() {
+            if self.input.is_key_pressed(KeyCode::Escape) {
+                self.dialogue_state = DialogueState::Closed;
+            } else {
+                let idx = if self.input.is_key_pressed(KeyCode::Digit1) { 0 }
+                    else if self.input.is_key_pressed(KeyCode::Digit2) { 1 }
+                    else if self.input.is_key_pressed(KeyCode::Digit3) { 2 }
+                    else if self.input.is_key_pressed(KeyCode::Digit4) { 3 }
+                    else { 4 };
+                if idx < 4 {
+                    if let Some((_, choices)) = self.dialogue_state.current_line_and_choices() {
+                        if idx < choices.len() {
+                            self.dialogue_state.select_choice(idx);
+                        }
+                    }
+                }
+            }
         }
 
         // Clear input for next frame
@@ -2304,14 +2632,52 @@ impl GameState {
         }
     }
 
-    /// Update main menu: minimal (no 3D scene, just input handling).
+    /// Update main menu: Continue/Play, Universe Map, Quit. Universe Map opens galaxy; Enter = travel and board.
     fn update_main_menu(&mut self, dt: f32) {
-        // Menu navigation: Up/Down or W/S
+        if self.main_menu_galaxy_open {
+            // Galaxy map from main menu: M = close, arrows = select system, Enter = travel to system and board Roger Young
+            let num_systems = self.universe.systems.len();
+            if self.input.is_key_pressed(KeyCode::KeyM) || self.input.is_key_pressed(KeyCode::Escape) {
+                self.main_menu_galaxy_open = false;
+                self.galaxy_map_open = false;
+            } else if num_systems > 0 {
+                if self.input.is_key_pressed(KeyCode::ArrowUp) || self.input.is_key_pressed(KeyCode::KeyW) {
+                    self.galaxy_map_selected = if self.galaxy_map_selected == 0 { num_systems - 1 } else { self.galaxy_map_selected - 1 };
+                }
+                if self.input.is_key_pressed(KeyCode::ArrowDown) || self.input.is_key_pressed(KeyCode::KeyS) {
+                    self.galaxy_map_selected = (self.galaxy_map_selected + 1) % num_systems;
+                }
+                if self.input.is_key_pressed(KeyCode::Enter) || self.input.is_key_pressed(KeyCode::Space) {
+                    // Travel to selected system and board ship (Star Citizen style: pick destination then board)
+                    self.current_system_idx = self.galaxy_map_selected;
+                    self.current_system = self.universe.generate_system(self.galaxy_map_selected);
+                    let num_planets = self.current_system.bodies.len();
+                    self.war_state = GalacticWarState::new(num_planets);
+                    self.current_planet_idx = Some(0);
+                    self.planet = self.current_system.bodies[0].planet.clone();
+                    self.main_menu_galaxy_open = false;
+                    self.galaxy_map_open = false;
+                    self.begin_ship_phase(0);
+                    let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::Locked)
+                        .or_else(|_| self.renderer.window.set_cursor_grab(CursorGrabMode::Confined));
+                    self.renderer.window.set_cursor_visible(false);
+                    self.input.set_cursor_locked(true);
+                self.game_messages.info(format!("FEDERATION DESTROYER \"ROGER YOUNG\" - {} SYSTEM", self.current_system.name));
+                self.game_messages.info(format!("Star: {} ({:?}) | {} planets", self.current_system.star.name, self.current_system.star.star_type, num_planets));
+                self.game_messages.info("Approach the WAR TABLE [E] — pick planet and mission. Drop bay is aft.");
+                self.game_messages.warning("Press [SPACE] to deploy drop pod!");
+                }
+            }
+            self.game_messages.update(dt);
+            return;
+        }
+
+        // Menu navigation: Up/Down or W/S (3 items: Continue/Play, Universe Map, Quit)
         if self.input.is_key_pressed(KeyCode::ArrowUp) || self.input.is_key_pressed(KeyCode::KeyW) {
             self.main_menu_selected = self.main_menu_selected.saturating_sub(1);
         }
         if self.input.is_key_pressed(KeyCode::ArrowDown) || self.input.is_key_pressed(KeyCode::KeyS) {
-            self.main_menu_selected = (self.main_menu_selected + 1).min(1);
+            self.main_menu_selected = (self.main_menu_selected + 1).min(2);
         }
 
         // Select: Enter, Space, or Left Click
@@ -2320,7 +2686,7 @@ impl GameState {
             || self.input.is_mouse_pressed(winit::event::MouseButton::Left)
         {
             if self.main_menu_selected == 0 {
-                // Play — transition to ship interior (lock cursor for FPS)
+                // Continue / Play — transition to ship interior (lock cursor for FPS)
                 self.current_planet_idx = Some(0);
                 self.planet = self.current_system.bodies[0].planet.clone();
                 let first_planet = 0;
@@ -2329,19 +2695,30 @@ impl GameState {
                     .or_else(|_| self.renderer.window.set_cursor_grab(CursorGrabMode::Confined));
                 self.renderer.window.set_cursor_visible(false);
                 self.input.set_cursor_locked(true);
-                let biome_names: Vec<String> = self.chunk_manager.planet_biomes.biomes.iter().map(|b| format!("{:?}", b)).collect();
+                let (biome_display, danger_display) = if self.planet.name == "Earth" {
+                    (self.chunk_manager.planet_biomes.biomes.iter().map(|b| format!("{:?}", b)).collect::<Vec<_>>().join(", "), "—".to_string())
+                } else if self.planet.has_unknown_intel {
+                    ("???".to_string(), "???".to_string())
+                } else {
+                    let biomes: String = self.chunk_manager.planet_biomes.biomes.iter().map(|b| format!("{:?}", b)).collect::<Vec<_>>().join(", ");
+                    (biomes, self.planet.danger_level.to_string())
+                };
                 self.game_messages.info(format!("FEDERATION DESTROYER \"ROGER YOUNG\" - {} SYSTEM", self.current_system.name));
                 self.game_messages.info(format!("Star: {} ({:?}) | {} planets", self.current_system.star.name, self.current_system.star.star_type, self.current_system.bodies.len()));
-                let danger_str = if self.planet.name == "Earth" { "—".to_string() } else { self.planet.danger_level.to_string() };
-                self.game_messages.info(format!("TARGET: {} | Biomes: {} | Danger: {}", self.planet.name, biome_names.join(", "), danger_str));
+                self.game_messages.info(format!("TARGET: {} | Biomes: {} | Danger: {}", self.planet.name, biome_display, danger_display));
                 self.game_messages.warning("Press [SPACE] to deploy drop pod!");
+            } else if self.main_menu_selected == 1 {
+                // Universe Map — open galaxy (Star Citizen style: choose system then board)
+                self.main_menu_galaxy_open = true;
+                self.galaxy_map_open = true;
+                self.galaxy_map_selected = self.current_system_idx;
             } else {
                 // Quit
                 self.running = false;
             }
         }
 
-        // Escape = Quit from menu
+        // Escape = Quit from menu (only when not in galaxy sub-view)
         if self.input.is_key_pressed(KeyCode::Escape) {
             self.running = false;
         }
@@ -2359,6 +2736,8 @@ impl GameState {
     fn transition_to_main_menu(&mut self) {
         self.phase = GamePhase::MainMenu;
         self.main_menu_selected = 0;
+        self.main_menu_galaxy_open = false;
+        self.galaxy_map_open = false;
         self.pause_menu_selected = 0;
         self.previous_phase = None;
         self.ship_state = None;
@@ -2379,11 +2758,17 @@ impl GameState {
         }
         self.effects = EffectsManager::new();
         self.rain_drops.clear();
+        self.snow_particles.clear();
         self.artillery_shells.clear();
         self.artillery_muzzle_flashes.clear();
         self.artillery_trail_particles.clear();
         self.grounded_artillery_shells.clear();
-        self.grounded_shell_casings.clear();
+        for c in self.shell_casings.drain(..) {
+            self.physics.remove_body(c.body_handle);
+        }
+        for s in self.grounded_shell_casings.drain(..) {
+            self.physics.remove_body(s.body_handle);
+        }
         self.artillery_barrage = None;
         self.extraction_squadmates_aboard.clear();
         self.last_player_track_pos = None;
@@ -2393,10 +2778,25 @@ impl GameState {
 
     /// Update while aboard the Federation destroyer.
     fn update_ship(&mut self, dt: f32) {
-        // FTL from war table: advance warp while InShip (gameplay() only runs when Playing)
+        // FTL from war table / galaxy map: Roger Young actually warps through galaxy space with visual feedback
         if let Some(ref mut warp) = self.warp_sequence {
             warp.timer += dt;
-            // Stand at the front with pilot (Lt. Parks) and captain (Ensign Levy), looking out the viewscreen
+            // Capture start position once (ship's galaxy position when warp began)
+            if self.warp_start_galaxy_position.is_none() {
+                self.warp_start_galaxy_position = Some(self.universe.systems[self.current_system_idx].position);
+            }
+            let start = self.warp_start_galaxy_position.unwrap_or(self.universe.systems[self.current_system_idx].position);
+            let target_pos = self.universe.systems[warp.target_system_idx].position;
+            // Smooth ease: fast in middle (smooth_step)
+            let t = warp.progress();
+            let ease = t * t * (3.0 - 2.0 * t);
+            let ease_f64 = ease as f64;
+            self.universe_position = DVec3::new(
+                start.x + (target_pos.x - start.x) * ease_f64,
+                start.y + (target_pos.y - start.y) * ease_f64,
+                start.z + (target_pos.z - start.z) * ease_f64,
+            );
+            // Bridge view: stand at front looking out viewscreen
             self.camera.transform.position = Vec3::new(0.0, 1.7, 10.0);
             self.camera.set_yaw_pitch(0.0, 0.0);
             self.renderer.update_camera(&self.camera, 0.0);
@@ -2404,6 +2804,7 @@ impl GameState {
                 let target_idx = warp.target_system_idx;
                 let return_to_ship = self.warp_return_to_ship;
                 self.warp_sequence = None;
+                self.warp_start_galaxy_position = None;
                 self.warp_return_to_ship = false;
                 self.arrive_at_system(target_idx);
                 if return_to_ship {
@@ -2586,6 +2987,48 @@ impl GameState {
             self.camera.transform.position.z - drop_bay_pos.z,
         ).length();
 
+        // Dynamic interaction prompt (same style as dialogue; overlay draws from this)
+        if !war_table_active {
+            if dist_to_table < 4.0 {
+                self.interaction_prompt = Some(InteractPrompt {
+                    key: INTERACT_KEY,
+                    action: "ACCESS WAR TABLE".to_string(),
+                });
+            } else if dist_to_bay < 4.0 {
+                self.interaction_prompt = Some(InteractPrompt {
+                    key: DEPLOY_KEY,
+                    action: format!("DEPLOY TO {}", self.planet.name),
+                });
+            } else {
+                const TALK_RANGE_SQ: f32 = 3.0 * 3.0;
+                let cam_pos = self.camera.position();
+                let mut nearest: Option<(f32, &'static str, usize)> = None;
+                for npc in roger_young_interior_npcs() {
+                    let dist_sq = npc.position.distance_squared(cam_pos);
+                    if dist_sq < TALK_RANGE_SQ {
+                        if nearest.as_ref().map(|(d, _, _)| *d > dist_sq).unwrap_or(true) {
+                            nearest = Some((dist_sq, npc.name, npc.dialogue_id));
+                        }
+                    }
+                }
+                if let Some((_, name, dialogue_id)) = nearest {
+                    self.interaction_prompt = Some(InteractPrompt {
+                        key: INTERACT_KEY,
+                        action: format!("Talk to {}", name),
+                    });
+                    if self.input.is_key_pressed(KeyCode::KeyE) && !self.dialogue_state.is_open() {
+                        self.dialogue_state = DialogueState::Open {
+                            speaker_entity: None,
+                            speaker_name: name.to_string(),
+                            dialogue_id,
+                            node_index: 0,
+                            showing_choices: true,
+                        };
+                    }
+                }
+            }
+        }
+
         if self.input.is_key_pressed(KeyCode::Space) && dist_to_bay < 4.0 {
             if let Some(ship) = self.ship_state.take() {
                 let planet_idx = ship.target_planet_idx;
@@ -2659,11 +3102,79 @@ impl GameState {
         self.ambient_dust.particles.clear();
         self.biome_atmosphere.particles.clear();
         self.rain_drops.clear();
+        self.snow_particles.clear();
         self.complete_earth_visit();
     }
 
     /// Land on Earth (dropship pad at city center). No crater, no squad pods — bustling Federation world.
     fn complete_earth_visit(&mut self) {
+        // Load all chunks covering the full territory so road/building height samples and colliders are correct.
+        let (min_x, max_x, min_z, max_z) = earth_territory::territory_bounds();
+        let extent = (max_x - min_x).max(max_z - min_z) + 128.0;
+        let scatter_range = extent.max(400.0);
+        self.chunk_manager.ensure_chunks_loaded_for_spawn(
+            scatter_range,
+            self.renderer.device(),
+            &mut self.physics,
+        );
+
+        // Flatten terrain so the city sits on flat ground: city core first, then roads, then building lots.
+        const BUILDING_LOT_MARGIN: f32 = 6.0;  // extra flat ground around each building (meters)
+        const ROAD_SHOULDER_MARGIN: f32 = 4.0; // extra flat width each side of roads
+        const CITY_CORE_RADIUS: f32 = 62.0;   // Buenos Aires Metro core — one flat plateau
+        let mut modified: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+        // Phase 1: one flat plateau for the capital so the core is never mangled.
+        let core_height = self.chunk_manager.sample_height(0.0, 0.0);
+        for key in self.chunk_manager.flatten_circle(0.0, 0.0, CITY_CORE_RADIUS, core_height) {
+            modified.insert(key);
+        }
+        // Phase 2: compute flat heights for roads and building lots (no mutable borrow yet).
+        let mut building_flats: Vec<(f32, f32, f32, f32, f32)> = Vec::new();
+        for &(bx, bz, sx, _sy, sz) in earth_territory::earth_building_boxes() {
+            let flat_h = earth_territory::building_footprint_base_y(bx, bz, sx, sz, |x, z| self.chunk_manager.sample_height(x, z));
+            let hx = sx * 0.5 + BUILDING_LOT_MARGIN;
+            let hz = sz * 0.5 + BUILDING_LOT_MARGIN;
+            building_flats.push((bx - hx, bx + hx, bz - hz, bz + hz, flat_h));
+        }
+        let mut road_flats: Vec<(f32, f32, f32, f32, f32, f32)> = Vec::new();
+        for (cx, cz, half_len, half_w, rot) in earth_territory::road_collider_segments() {
+            let s = rot.sin();
+            let c = rot.cos();
+            let corners = [
+                (cx + half_len * s - half_w * c, cz + half_len * c + half_w * s),
+                (cx + half_len * s + half_w * c, cz + half_len * c - half_w * s),
+                (cx - half_len * s + half_w * c, cz - half_len * c - half_w * s),
+                (cx - half_len * s - half_w * c, cz - half_len * c + half_w * s),
+            ];
+            let flat_h = corners
+                .iter()
+                .map(|&(x, z)| self.chunk_manager.sample_height(x, z))
+                .fold(f32::NEG_INFINITY, f32::max);
+            road_flats.push((cx, cz, half_len, half_w + ROAD_SHOULDER_MARGIN, rot, flat_h));
+        }
+        // Phase 3: flatten roads then building lots (lots override so they stay uniform where they cross roads).
+        for (cx, cz, half_len, half_w, rot, flat_h) in road_flats {
+            for key in self.chunk_manager.flatten_road_segment(cx, cz, half_len, half_w, rot, flat_h) {
+                modified.insert(key);
+            }
+        }
+        for (min_x, max_x, min_z, max_z, flat_h) in building_flats {
+            for key in self.chunk_manager.flatten_rect(min_x, max_x, min_z, max_z, flat_h) {
+                modified.insert(key);
+            }
+        }
+        let modified: Vec<(i32, i32)> = modified.into_iter().collect();
+        if !modified.is_empty() {
+            let to_rebuild = self.chunk_manager.sync_chunk_edge_heights(&modified);
+            for key in to_rebuild {
+                self.chunk_manager.rebuild_chunk_mesh_and_collider(
+                    key,
+                    self.renderer.device(),
+                    &mut self.physics,
+                );
+            }
+        }
+
         let landing = Vec3::ZERO; // Dropship pad / city center
         let spawn_y = self.chunk_manager.walkable_height(landing.x, landing.z) + 1.8;
         let spawn_pos = Vec3::new(landing.x, spawn_y, landing.z);
@@ -2698,8 +3209,8 @@ impl GameState {
             self.earth_road_colliders.push(handle);
         }
         for &(bx, bz, sx, sy, sz) in earth_territory::earth_building_boxes() {
-            let terrain_y = self.chunk_manager.sample_height(bx, bz);
-            let cy = terrain_y + sy * 0.5;
+            let base_y = earth_territory::building_footprint_base_y(bx, bz, sx, sz, |x, z| self.chunk_manager.sample_height(x, z));
+            let cy = base_y + sy * 0.5;
             let center = Vec3::new(bx, cy, bz);
             let half_extents = Vec3::new(sx * 0.5, sy * 0.5, sz * 0.5);
             let handle = self.physics.add_static_cuboid(center, 0.0, half_extents);
@@ -2730,6 +3241,7 @@ impl GameState {
         self.ambient_dust.particles.clear();
         self.biome_atmosphere.particles.clear();
         self.rain_drops.clear();
+        self.snow_particles.clear();
 
         self.drop_pod = Some(DropPodSequence::new(planet_idx));
         self.phase = GamePhase::DropSequence;
@@ -3670,11 +4182,19 @@ impl GameState {
         // Apply velocity to position
         let mut new_pos = self.camera.transform.position + self.player_velocity * dt;
 
-        // On Earth: push out of building footprints so player cannot walk through UCF buildings
+        // On Earth: push out of building footprints so player cannot walk through UCF buildings.
+        // Do not push when the player is on a road — lets them walk on roads without being shoved.
         if self.planet.name == "Earth" {
-            let (px, pz) = earth_territory::push_out_of_building_footprints(new_pos.x, new_pos.z);
-            new_pos.x = px;
-            new_pos.z = pz;
+            let on_road = earth_territory::road_ground_y_at(
+                new_pos.x,
+                new_pos.z,
+                |a, b| self.chunk_manager.sample_height(a, b),
+            ).is_some();
+            if !on_road {
+                let (px, pz) = earth_territory::push_out_of_building_footprints(new_pos.x, new_pos.z);
+                new_pos.x = px;
+                new_pos.z = pz;
+            }
         }
 
         // Terrain collision: sample ground height at new position
@@ -3739,6 +4259,10 @@ impl GameState {
                 }
             }
         }
+        // Knee-deep snow: stand on terrain + accumulated snow (weather-driven)
+        if !is_in_water {
+            ground_y += self.sample_snow_depth(new_pos.x, new_pos.z);
+        }
 
         let feet_y = new_pos.y - eye_height;
 
@@ -3798,44 +4322,55 @@ impl GameState {
         }
     }
 
-    /// Entrenchment shovel: dig trench + raise berm (wall) from excavated earth.
+    /// Entrenchment shovel: Ace of Spades–style blocky dig (one block per click) + blocky dirt pile.
     fn handle_entrenchment_shovel(&mut self) {
         let origin = self.camera.position();
         let direction = self.camera.forward();
         let max_range = 4.0;
+        const BLOCK_SIZE: f32 = 0.5;
 
-        let physics_hit = self.physics.raycast(origin, direction, max_range);
-        if let Some(hit) = physics_hit {
-            if !self.chunk_manager.is_terrain_collider(hit.collider) {
-                return;
-            }
-            if hit.distance > max_range {
-                return;
-            }
+        // Use raycast_all and take the first *terrain* hit so we dig ground even when aiming through rocks
+        let hits = self.physics.raycast_all(origin, direction, max_range);
+        let hit = hits
+            .into_iter()
+            .find(|h| self.chunk_manager.is_terrain_collider(h.collider) && h.distance <= max_range);
 
-            // Dig trench at hit point
-            self.chunk_manager.deform_at(
-                hit.point,
-                1.2,   // trench radius
-                0.7,   // trench depth
+        if let Some(hit) = hit {
+            // Snap hit to block grid (Ace of Spades style)
+            let snap_x = (hit.point.x / BLOCK_SIZE).floor() * BLOCK_SIZE;
+            let snap_z = (hit.point.z / BLOCK_SIZE).floor() * BLOCK_SIZE;
+            let dig_center = Vec3::new(snap_x, hit.point.y, snap_z);
+
+            // Remove one block at this cell
+            self.chunk_manager.deform_at_blocky(
+                dig_center,
+                BLOCK_SIZE,
                 self.renderer.device(),
                 &mut self.physics,
             );
 
-            // Berm (wall) from excavated earth: offset toward player
+            // Dirt pile: one block raised in the cell in front of the dig (toward player)
             let to_player = self.player.position - hit.point;
             let to_player_h = Vec3::new(to_player.x, 0.0, to_player.z).normalize_or_zero();
-            let berm_center = hit.point + to_player_h * 1.0;
+            let pile_center = dig_center + to_player_h * BLOCK_SIZE;
+            let pile_snap_x = (pile_center.x / BLOCK_SIZE).floor() * BLOCK_SIZE;
+            let pile_snap_z = (pile_center.z / BLOCK_SIZE).floor() * BLOCK_SIZE;
 
-            self.chunk_manager.deform_mound_at(
-                berm_center,
-                1.0,   // berm radius
-                0.5,   // berm height (defensive wall)
+            self.chunk_manager.deform_mound_at_blocky(
+                Vec3::new(pile_snap_x, pile_center.y, pile_snap_z),
+                BLOCK_SIZE,
                 self.renderer.device(),
                 &mut self.physics,
             );
 
-            // Visual feedback: dirt/dust impacts for seamless feel
+            // Rebuild affected chunks immediately so the dig is visible this frame
+            self.chunk_manager.process_pending_rebuilds(
+                self.renderer.device(),
+                &mut self.physics,
+                8,
+            );
+
+            // Visual feedback: dirt/dust impacts
             self.effects.spawn_bullet_impact(hit.point, hit.normal, false);
             for _ in 0..2 {
                 let offset = Vec3::new(
@@ -3845,7 +4380,6 @@ impl GameState {
                 );
                 self.effects.spawn_bullet_impact(hit.point + offset, hit.normal, false);
             }
-            // Ground track in snow/sand biomes (footprint-style dig mark)
             if Self::biome_has_snow_or_sand(self.planet.primary_biome) {
                 let dig_y = self.chunk_manager.sample_height(hit.point.x, hit.point.z) + 0.02;
                 self.effects.spawn_ground_track(
@@ -3856,7 +4390,7 @@ impl GameState {
             }
 
             self.screen_shake.add_trauma(0.035);
-            self.game_messages.info("Entrenchment dug — wall raised!".to_string());
+            self.game_messages.info("Block dug — dirt piled!".to_string());
         } else {
             self.game_messages.info("Aim at the ground to dig (within 4m)".to_string());
         }
@@ -3867,11 +4401,15 @@ impl GameState {
             return;
         }
 
-        // Entrenching shovel (slot 4): left-click to dig
+        // Entrenching shovel (slot 4): click or hold LMB to dig (hold = larger hole)
         if self.player.is_shovel_equipped() {
-            if self.input.is_fire_pressed() && self.current_planet_idx.is_some()
-            {
-                self.handle_entrenchment_shovel();
+            if self.current_planet_idx.is_some() {
+                let dt = self.smoothed_dt;
+                self.shovel_dig_cooldown = (self.shovel_dig_cooldown - dt).max(0.0);
+                if self.input.is_fire_held() && self.shovel_dig_cooldown <= 0.0 {
+                    self.handle_entrenchment_shovel();
+                    self.shovel_dig_cooldown = 0.22; // ~4–5 digs per second while holding
+                }
             }
             return;
         }
@@ -3955,16 +4493,25 @@ impl GameState {
                     (rand::random::<f32>() - 0.5) * 30.0,
                     (rand::random::<f32>() - 0.5) * 30.0,
                 );
+                let rotation = Quat::from_euler(
+                    glam::EulerRot::XYZ,
+                    rand::random::<f32>() * std::f32::consts::TAU,
+                    rand::random::<f32>() * std::f32::consts::TAU,
+                    0.0,
+                );
+                let radius = size * 1.2; // sphere collider for casing
+                let (body_handle, collider_handle) = self.physics.add_shell_casing_body(
+                    eject_pos,
+                    rotation,
+                    eject_vel,
+                    angular_vel,
+                    radius,
+                );
                 self.shell_casings.push(ShellCasing {
                     position: eject_pos,
-                    velocity: eject_vel,
-                    rotation: Quat::from_euler(
-                        glam::EulerRot::XYZ,
-                        rand::random::<f32>() * std::f32::consts::TAU,
-                        rand::random::<f32>() * std::f32::consts::TAU,
-                        0.0,
-                    ),
-                    angular_velocity: angular_vel,
+                    rotation,
+                    body_handle,
+                    collider_handle,
                     lifetime: 4.0,
                     size,
                     shell_type,
@@ -4026,10 +4573,15 @@ impl GameState {
         }
     }
 
-    /// Find the bug entity that owns the given collider, if any.
+    /// Find the entity that owns the given collider (bug or destructible).
     fn entity_for_collider(&self, collider: ColliderHandle) -> Option<hecs::Entity> {
         for (entity, physics_bug) in self.world.query::<&PhysicsBug>().iter() {
             if physics_bug.collider_handle == Some(collider) {
+                return Some(entity);
+            }
+        }
+        for (entity, phys) in self.world.query::<&DestructiblePhysics>().iter() {
+            if phys.collider_handle == collider {
                 return Some(entity);
             }
         }
@@ -4158,7 +4710,7 @@ impl GameState {
                     let victim_name = if let Ok(bug) = self.world.get::<&Bug>(entity) {
                         format!("{:?}", bug.bug_type)
                     } else if let Ok(skinny) = self.world.get::<&Skinny>(entity) {
-                        format!("Skinny {:?}", skinny.skinny_type)
+                        skinny.skinny_type.display_name().to_string()
                     } else {
                         "Enemy".to_string()
                     };
@@ -4214,7 +4766,7 @@ impl GameState {
             self.apply_chain_reaction(center, radius, chain_damage);
         }
 
-        // Remove all destroyed destructible entities
+        // Remove all destroyed destructible entities (and their physics bodies)
         let to_remove: Vec<hecs::Entity> = self
             .world
             .query::<&Destructible>()
@@ -4223,6 +4775,9 @@ impl GameState {
             .map(|(e, _)| e)
             .collect();
         for e in to_remove {
+            if let Ok(phys) = self.world.get::<&DestructiblePhysics>(e) {
+                self.physics.remove_body(phys.body_handle);
+            }
             let _ = self.world.despawn(e);
         }
     }
@@ -4277,14 +4832,24 @@ impl GameState {
             num_planets
         ));
 
-        // Clear old state
+        // Clear old state: remove destructible physics bodies then despawn all entities
         self.chunk_manager.clear_all(&mut self.physics);
+        let destructible_bodies: Vec<physics::RigidBodyHandle> = self
+            .world
+            .query::<&DestructiblePhysics>()
+            .iter()
+            .map(|(_, p)| p.body_handle)
+            .collect();
+        for h in destructible_bodies {
+            self.physics.remove_body(h);
+        }
         let all_entities: Vec<hecs::Entity> = self.world.iter().map(|e| e.entity()).collect();
         for entity in all_entities {
             let _ = self.world.despawn(entity);
         }
         self.effects = EffectsManager::new();
         self.rain_drops.clear();
+        self.snow_particles.clear();
         self.tracer_projectiles.clear();
         self.last_player_track_pos = None;
         self.ground_track_bug_timer = 0.0;
@@ -4300,20 +4865,49 @@ impl GameState {
         matches!(
             b,
             BiomeType::Desert | BiomeType::Frozen | BiomeType::Wasteland | BiomeType::Badlands
+                | BiomeType::Tundra | BiomeType::SaltFlat
         )
+    }
+
+    /// Sample snow accumulation at world (x, z). Returns 0 if outside the 128m tile or no snow.
+    fn sample_snow_depth(&self, x: f32, z: f32) -> f32 {
+        let (ox, oz) = self.snow_accumulation_origin;
+        let world_size = 2.0 * DEFORM_HALF_SIZE;
+        let texels_per_unit = (DEFORM_TEXTURE_SIZE as f32) / world_size;
+        let i_f = (x - ox + DEFORM_HALF_SIZE) * texels_per_unit;
+        let j_f = (z - oz + DEFORM_HALF_SIZE) * texels_per_unit;
+        if i_f < -0.5 || i_f > DEFORM_TEXTURE_SIZE as f32 - 0.5
+            || j_f < -0.5 || j_f > DEFORM_TEXTURE_SIZE as f32 - 0.5
+        {
+            return 0.0;
+        }
+        let i0 = (i_f - 0.5).floor() as i32;
+        let j0 = (j_f - 0.5).floor() as i32;
+        let i1 = (i0 + 1).min(DEFORM_TEXTURE_SIZE as i32 - 1);
+        let j1 = (j0 + 1).min(DEFORM_TEXTURE_SIZE as i32 - 1);
+        let i0 = i0.max(0);
+        let j0 = j0.max(0);
+        let fx = (i_f - 0.5 - i0 as f32).clamp(0.0, 1.0);
+        let fy = (j_f - 0.5 - j0 as f32).clamp(0.0, 1.0);
+        let idx = |i: i32, j: i32| i as usize + j as usize * (DEFORM_TEXTURE_SIZE as usize);
+        let s00 = self.snow_accumulation_buffer[idx(i0, j0)];
+        let s10 = self.snow_accumulation_buffer[idx(i1, j0)];
+        let s01 = self.snow_accumulation_buffer[idx(i0, j1)];
+        let s11 = self.snow_accumulation_buffer[idx(i1, j1)];
+        s00 * (1.0 - fx) * (1.0 - fy) + s10 * fx * (1.0 - fy) + s01 * (1.0 - fx) * fy + s11 * fx * fy
     }
 
     /// Emit ground tracks (footprints) for player, squad, and bugs when moving on snow/sand.
     fn emit_ground_tracks(&mut self, dt: f32) {
-        let sample_y = |x: f32, z: f32| self.chunk_manager.sample_height(x, z);
-
         // ---- Player ----
         if self.player.is_alive && self.player.is_grounded {
             let vel_xz = Vec3::new(self.player_velocity.x, 0.0, self.player_velocity.z);
             if vel_xz.length_squared() > 0.12 {
                 let foot_x = self.player.position.x;
                 let foot_z = self.player.position.z;
-                let foot_y = sample_y(foot_x, foot_z) + 0.02;
+                let foot_y = self.chunk_manager.sample_height(foot_x, foot_z)
+                    + self.sample_snow_depth(foot_x, foot_z)
+                    + 0.02;
                 let foot_pos = Vec3::new(foot_x, foot_y, foot_z);
                 let should_emit = match &self.last_player_track_pos {
                     None => true,
@@ -4342,7 +4936,9 @@ impl GameState {
             }
             let foot_x = transform.position.x;
             let foot_z = transform.position.z;
-            let foot_y = sample_y(foot_x, foot_z) + 0.02;
+            let foot_y = self.chunk_manager.sample_height(foot_x, foot_z)
+                + self.sample_snow_depth(foot_x, foot_z)
+                + 0.02;
             let foot_pos = Vec3::new(foot_x, foot_y, foot_z);
             let should_emit = self
                 .squad_track_last
@@ -4391,7 +4987,9 @@ impl GameState {
                 }
                 let foot_x = transform.position.x;
                 let foot_z = transform.position.z;
-                let foot_y = sample_y(foot_x, foot_z) + 0.02;
+                let foot_y = self.chunk_manager.sample_height(foot_x, foot_z)
+                    + self.sample_snow_depth(foot_x, foot_z)
+                    + 0.02;
                 let foot_pos = Vec3::new(foot_x, foot_y, foot_z);
                 let vel_xz = Vec3::new(velocity.linear.x, 0.0, velocity.linear.z);
                 let yaw = vel_xz.normalize().to_array();
@@ -4439,11 +5037,17 @@ impl GameState {
             }
             self.effects = EffectsManager::new();
             self.rain_drops.clear();
+            self.snow_particles.clear();
             self.artillery_shells.clear();
             self.artillery_muzzle_flashes.clear();
             self.artillery_trail_particles.clear();
             self.grounded_artillery_shells.clear();
-            self.grounded_shell_casings.clear();
+            for c in self.shell_casings.drain(..) {
+                self.physics.remove_body(c.body_handle);
+            }
+            for s in self.grounded_shell_casings.drain(..) {
+                self.physics.remove_body(s.body_handle);
+            }
             self.artillery_barrage = None;
             self.extraction_squadmates_aboard.clear();
             self.last_player_track_pos = None;
@@ -4482,16 +5086,31 @@ impl GameState {
         }
     }
 
+    /// Federation Bulletin / sector report (Helldivers 2 style) when entering ship.
+    fn push_sector_bulletin(&mut self) {
+        let num_planets = self.war_state.planets.len();
+        let total_lib: f32 = self.war_state.planets.iter().map(|p| p.liberation).sum();
+        let avg_lib = if num_planets > 0 { total_lib / num_planets as f32 } else { 0.0 };
+        let pct = (avg_lib * 100.0) as u32;
+        self.game_messages.info(format!(
+            "FEDERATION BULLETIN — {} System: {} planets | Sector liberation: {}%",
+            self.current_system.name, num_planets, pct,
+        ));
+        if let Some(order) = self.war_state.major_orders.iter().find(|o| !o.completed) {
+            self.game_messages.info(format!("Major order: {} — {}", order.title, order.description));
+        }
+    }
+
     /// Enter the ship interior phase for a given planet (pre-drop staging).
     fn begin_ship_phase(&mut self, planet_idx: usize) {
         // If we were still on a planet (e.g. quit to menu then Play without having cleared), clear now
         if self.current_planet_idx.is_some() {
             self.leave_planet();
         }
+        self.push_sector_bulletin();
+        self.game_messages.info(format!("ROGER YOUNG — {} System", self.current_system.name));
         let body = &self.current_system.bodies[planet_idx];
         let planet = &body.planet;
-
-        self.game_messages.info(format!("ROGER YOUNG — {} System", self.current_system.name));
         if planet.name == "Earth" {
             self.game_messages.success("Orbiting Earth — homeworld. This is what we're fighting for.".to_string());
         }
@@ -4560,6 +5179,8 @@ impl GameState {
     fn switch_war_table_system(&mut self, system_idx: usize) {
         self.current_system_idx = system_idx;
         self.current_system = self.universe.generate_system(system_idx);
+        let seed = self.current_system.seed;
+        self.orbital_time = ((seed % 100000) as f64 * 0.123).rem_euclid(628.0);
         let num_planets = self.current_system.bodies.len();
         self.war_state = GalacticWarState::new(num_planets);
         self.war_state.selected_planet = 0;
@@ -4688,6 +5309,7 @@ fn landmark_visuals(
         LandmarkType::UCFBaseWall => (V3::new(4.0, 3.5, 2.0), 0.0, [0.32, 0.35, 0.38, 1.0], MESH_GROUP_CUBE),
         // Caves and abandoned UCF structures
         LandmarkType::CaveEntrance => (V3::new(2.5, 1.2, 1.8), 0.35, [0.22, 0.20, 0.18, 1.0], MESH_GROUP_BUG_HOLE),
+        LandmarkType::HiveCaveEntrance => (V3::new(3.2, 1.5, 2.5), 0.4, [0.14, 0.10, 0.08, 1.0], MESH_GROUP_HIVE_CAVE_ENTRANCE),
         LandmarkType::AbandonedUCFResearchStation => (V3::new(2.2, 2.0, 2.0), 0.3, [0.38, 0.40, 0.42, 1.0], MESH_GROUP_CUBE),
         LandmarkType::AbandonedUCFBase => (V3::new(2.5, 2.5, 2.5), 0.35, [0.30, 0.32, 0.34, 1.0], MESH_GROUP_CUBE),
     }
@@ -4747,6 +5369,9 @@ fn chain_reaction_params(landmark_type: LandmarkType) -> (f32, f32, ChainEffect)
         LandmarkType::RustedVehicle => (6.0, 55.0, ChainEffect::Explosion),
         LandmarkType::UCFColony | LandmarkType::UCFBase | LandmarkType::UCFBaseWall => (6.0, 45.0, ChainEffect::Explosion),
         LandmarkType::CaveEntrance => (5.0, 35.0, ChainEffect::Collapse),
+        LandmarkType::HiveCaveEntrance => (6.5, 55.0, ChainEffect::Collapse),
+        LandmarkType::PulsingEggWall => (4.0, 22.0, ChainEffect::AcidSplash),
+        LandmarkType::OrganicTunnel => (5.0, 40.0, ChainEffect::Collapse),
         LandmarkType::AbandonedUCFResearchStation | LandmarkType::AbandonedUCFBase => (6.0, 50.0, ChainEffect::Explosion),
         _ => (3.0, 20.0, ChainEffect::Explosion),
     }
@@ -4773,36 +5398,41 @@ impl GameState {
         // Pre-compute biome-dependent colors for cached rendering
         let rock_color: [f32; 4] = match primary {
             BiomeType::Desert | BiomeType::Badlands => [0.55, 0.45, 0.32, 1.0],
-            BiomeType::Volcanic | BiomeType::Ashlands => [0.25, 0.22, 0.20, 1.0],
-            BiomeType::Frozen => [0.55, 0.58, 0.62, 1.0],
+            BiomeType::Volcanic | BiomeType::Ashlands | BiomeType::Scorched => [0.25, 0.22, 0.20, 1.0],
+            BiomeType::Frozen | BiomeType::Tundra => [0.55, 0.58, 0.62, 1.0],
             BiomeType::Toxic | BiomeType::Swamp => [0.35, 0.38, 0.30, 1.0],
             BiomeType::Crystalline => [0.50, 0.48, 0.55, 1.0],
-            BiomeType::Mountain => [0.48, 0.46, 0.44, 1.0],
+            BiomeType::Mountain | BiomeType::Ruins => [0.48, 0.46, 0.44, 1.0],
             BiomeType::HiveWorld => [0.35, 0.28, 0.22, 1.0],
-            BiomeType::Jungle => [0.38, 0.40, 0.30, 1.0],
+            BiomeType::Jungle | BiomeType::Fungal => [0.38, 0.40, 0.30, 1.0],
             BiomeType::Wasteland => [0.40, 0.38, 0.35, 1.0],
+            BiomeType::SaltFlat => [0.82, 0.80, 0.78, 1.0],
+            BiomeType::Storm => [0.32, 0.34, 0.36, 1.0],
             _ => [0.45, 0.42, 0.40, 1.0],
         };
         let prop_color: [f32; 4] = match primary {
             BiomeType::Crystalline => [0.55, 0.45, 0.70, 1.0],  // Prismatic purple
             BiomeType::Jungle => [0.22, 0.45, 0.14, 1.0],      // Rich jungle green
             BiomeType::Swamp => [0.30, 0.35, 0.22, 1.0],       // Murky bayou
-            BiomeType::Frozen => [0.60, 0.65, 0.72, 1.0],      // Ice blue
-            BiomeType::Volcanic => [0.30, 0.18, 0.12, 1.0],    // Obsidian black
+            BiomeType::Frozen | BiomeType::Tundra => [0.60, 0.65, 0.72, 1.0], // Ice blue
+            BiomeType::Volcanic | BiomeType::Scorched => [0.30, 0.18, 0.12, 1.0], // Obsidian black
             BiomeType::Ashlands => [0.32, 0.30, 0.28, 1.0],     // Ash gray
             BiomeType::Toxic => [0.35, 0.40, 0.25, 1.0],       // Sickly green
-            BiomeType::Desert => [0.52, 0.45, 0.35, 1.0],      // Sandy tan, dry vegetation
+            BiomeType::Desert | BiomeType::SaltFlat => [0.52, 0.45, 0.35, 1.0], // Sandy/salt
             BiomeType::Badlands => [0.48, 0.38, 0.32, 1.0],    // Red rock
             BiomeType::Mountain => [0.42, 0.44, 0.46, 1.0],    // Alpine gray
-            BiomeType::Wasteland => [0.38, 0.35, 0.30, 1.0],   // Rust, decay
+            BiomeType::Wasteland | BiomeType::Ruins => [0.38, 0.35, 0.30, 1.0], // Rust, decay
             BiomeType::HiveWorld => [0.35, 0.28, 0.22, 1.0],   // Organic brown
+            BiomeType::Fungal => [0.38, 0.32, 0.42, 1.0],      // Purple fungal
+            BiomeType::Storm => [0.35, 0.36, 0.38, 1.0],      // Storm grey
             _ => [0.48, 0.45, 0.40, 1.0],
         };
         let pool_color: [f32; 4] = match primary {
-            BiomeType::Toxic | BiomeType::Swamp => [0.2, 0.65, 0.1, 1.0],
-            BiomeType::Volcanic | BiomeType::Ashlands => [0.85, 0.3, 0.05, 1.0],
-            BiomeType::Frozen => [0.3, 0.6, 0.85, 1.0],
+            BiomeType::Toxic | BiomeType::Swamp | BiomeType::Fungal => [0.2, 0.65, 0.1, 1.0],
+            BiomeType::Volcanic | BiomeType::Ashlands | BiomeType::Scorched => [0.85, 0.3, 0.05, 1.0],
+            BiomeType::Frozen | BiomeType::Tundra => [0.3, 0.6, 0.85, 1.0],
             BiomeType::Crystalline => [0.6, 0.2, 0.7, 1.0],
+            BiomeType::Storm => [0.25, 0.4, 0.5, 1.0],
             _ => [0.3, 0.5, 0.2, 1.0],
         };
 
@@ -4814,14 +5444,14 @@ impl GameState {
             rng.gen_range(35..60)
         } else {
             match primary {
-                BiomeType::Toxic | BiomeType::Swamp => rng.gen_range(6..15),
+                BiomeType::Toxic | BiomeType::Swamp | BiomeType::Fungal => rng.gen_range(6..16),
                 BiomeType::Jungle => rng.gen_range(5..12),
-                BiomeType::Badlands => rng.gen_range(4..10),
-                BiomeType::Desert => rng.gen_range(3..8),
-                BiomeType::Volcanic | BiomeType::Ashlands => rng.gen_range(2..5),
-                BiomeType::Frozen | BiomeType::Crystalline => rng.gen_range(2..6),
+                BiomeType::Badlands | BiomeType::Ruins => rng.gen_range(4..11),
+                BiomeType::Desert | BiomeType::Storm => rng.gen_range(3..9),
+                BiomeType::Volcanic | BiomeType::Ashlands | BiomeType::Scorched => rng.gen_range(2..6),
+                BiomeType::Frozen | BiomeType::Crystalline | BiomeType::SaltFlat => rng.gen_range(2..6),
                 BiomeType::Wasteland => rng.gen_range(2..6),
-                BiomeType::Mountain => rng.gen_range(1..4),
+                BiomeType::Mountain | BiomeType::Tundra => rng.gen_range(1..5),
                 _ => rng.gen_range(3..8),
             }
         };
@@ -4846,7 +5476,55 @@ impl GameState {
 
         // ---- Hive structures (only on HiveWorlds, never on Earth) ----
         if has_hive && !is_earth {
-            let hive_count = rng.gen_range(20..40);
+            // Hive tunnel entrances: Minecraft-style cave mouths; bugs pour out; awesome collapse when destroyed
+            let tunnel_count = rng.gen_range(15..32);
+            for _ in 0..tunnel_count {
+                let x = (rng.gen::<f32>() - 0.5) * scatter_range;
+                let z = (rng.gen::<f32>() - 0.5) * scatter_range;
+                if x * x + z * z < clearance_sq { continue; }
+                let y = self.chunk_manager.sample_height(x, z);
+                let scale = 2.5 + rng.gen::<f32>() * 1.8;
+                let spawn_interval = 2.5 + rng.gen::<f32>() * 2.5;
+                let t = Transform {
+                    position: Vec3::new(x, y - scale * 0.25, z),
+                    rotation: Quat::from_rotation_y(rng.gen::<f32>() * std::f32::consts::TAU),
+                    scale: Vec3::new(scale, scale * 0.5, scale),
+                };
+                let cached = CachedRenderData { matrix: t.to_matrix().to_cols_array_2d(), color: [0.12, 0.08, 0.06, 1.0], mesh_group: MESH_GROUP_HIVE_CAVE_ENTRANCE };
+                self.world.spawn((
+                    t,
+                    Destructible::new(550.0 + scale * 40.0, 22, 0.52),
+                    BugHole::new(spawn_interval, 16),
+                    ChainReaction { radius: 6.5, damage: 58.0, effect: ChainEffect::Collapse },
+                    HiveTunnelEntrance,
+                    cached,
+                ));
+            }
+
+            // Hive nests: organic mounds full of eggs — explode in goo and chain-react
+            let nest_count = rng.gen_range(28..55);
+            for _ in 0..nest_count {
+                let x = (rng.gen::<f32>() - 0.5) * scatter_range;
+                let z = (rng.gen::<f32>() - 0.5) * scatter_range;
+                if x * x + z * z < clearance_sq { continue; }
+                let y = self.chunk_manager.sample_height(x, z);
+                let scale = 1.2 + rng.gen::<f32>() * 1.0;
+                let t = Transform {
+                    position: Vec3::new(x, y + scale * 0.4, z),
+                    rotation: Quat::from_rotation_y(rng.gen::<f32>() * std::f32::consts::TAU),
+                    scale: Vec3::new(scale, scale * 1.2, scale),
+                };
+                let cached = CachedRenderData { matrix: t.to_matrix().to_cols_array_2d(), color: [0.55, 0.48, 0.32, 1.0], mesh_group: MESH_GROUP_HIVE_MOUND };
+                self.world.spawn((
+                    t,
+                    Destructible::new(220.0 + scale * 50.0, 18, 0.35),
+                    ChainReaction { radius: 4.5, damage: 30.0, effect: ChainEffect::AcidSplash },
+                    HiveNest,
+                    cached,
+                ));
+            }
+
+            let hive_count = rng.gen_range(24..48);
             for _ in 0..hive_count {
                 let x = (rng.gen::<f32>() - 0.5) * scatter_range;
                 let z = (rng.gen::<f32>() - 0.5) * scatter_range;
@@ -4859,24 +5537,36 @@ impl GameState {
                     scale: Vec3::new(scale, scale * 1.5, scale),
                 };
                 let cached = CachedRenderData { matrix: t.to_matrix().to_cols_array_2d(), color: [0.30, 0.20, 0.15, 1.0], mesh_group: MESH_GROUP_HIVE_MOUND };
-                self.world.spawn((t, Destructible::new(300.0 + scale * 80.0, 10, 0.3), HiveStructure, cached));
+                self.world.spawn((
+                    t,
+                    Destructible::new(420.0 + scale * 100.0, 16, 0.4),
+                    ChainReaction { radius: 5.5, damage: 38.0, effect: ChainEffect::Explosion },
+                    HiveStructure,
+                    cached,
+                ));
             }
 
-            // Egg clusters (many on HiveWorlds)
-            let egg_count = rng.gen_range(60..120);
+            // Egg clusters: tons of eggs; chain-pop in acid goo when destroyed
+            let egg_count = rng.gen_range(95..175);
             for _ in 0..egg_count {
                 let x = (rng.gen::<f32>() - 0.5) * scatter_range;
                 let z = (rng.gen::<f32>() - 0.5) * scatter_range;
                 if x * x + z * z < clearance_sq { continue; }
                 let y = self.chunk_manager.sample_height(x, z);
-                let scale = 0.2 + rng.gen::<f32>() * 0.4;
+                let scale = 0.22 + rng.gen::<f32>() * 0.45;
                 let t = Transform {
                     position: Vec3::new(x, y + scale * 0.5, z),
                     rotation: Quat::from_rotation_y(rng.gen::<f32>() * std::f32::consts::TAU),
                     scale: Vec3::splat(scale),
                 };
                 let cached = CachedRenderData { matrix: t.to_matrix().to_cols_array_2d(), color: [0.60, 0.55, 0.35, 1.0], mesh_group: MESH_GROUP_EGG_CLUSTER };
-                self.world.spawn((t, Destructible::new(15.0, 3, 0.15), EggCluster, cached));
+                self.world.spawn((
+                    t,
+                    Destructible::new(28.0, 10, 0.22),
+                    ChainReaction { radius: 3.2, damage: 14.0, effect: ChainEffect::AcidSplash },
+                    EggCluster,
+                    cached,
+                ));
             }
         }
 
@@ -4904,8 +5594,12 @@ impl GameState {
                 rotation: Quat::from_rotation_y(rng.gen::<f32>() * std::f32::consts::TAU),
                 scale: Vec3::splat(scale),
             };
+            let body = self.physics.add_static_body_with_rotation(t.position, t.rotation);
+            let half = t.scale * 0.5;
+            let collider = self.physics.add_static_env_box_collider(body, half);
+            let phys = DestructiblePhysics { body_handle: body, collider_handle: collider };
             let cached = CachedRenderData { matrix: t.to_matrix().to_cols_array_2d(), color: rock_color, mesh_group: MESH_GROUP_ROCK };
-            self.world.spawn((t, Destructible::new(40.0 + scale * 60.0, 6, 0.25), Rock, cached));
+            self.world.spawn((t, Destructible::new(40.0 + scale * 60.0, 6, 0.25), Rock, cached, phys));
         }
 
         // ---- Biome-specific decorations (trees, crystals, etc.) ----
@@ -5082,7 +5776,10 @@ impl GameState {
                 scale: Vec3::new(scale * 2.0, scale * 0.6, scale * 1.2),
             };
             let cached = CachedRenderData { matrix: t.to_matrix().to_cols_array_2d(), color: [0.25, 0.27, 0.30, 1.0], mesh_group: MESH_GROUP_ROCK };
-            self.world.spawn((t, Destructible::new(500.0, 12, 0.4), CrashedShip, cached));
+            let body = self.physics.add_static_body_with_rotation(t.position, t.rotation);
+            let collider = self.physics.add_static_env_box_collider(body, t.scale * 0.5);
+            let phys = DestructiblePhysics { body_handle: body, collider_handle: collider };
+            self.world.spawn((t, Destructible::new(500.0, 12, 0.4), CrashedShip, cached, phys));
         }
 
         // ---- Bone piles / skeleton heaps (biome-dependent) ----
@@ -5327,11 +6024,15 @@ impl GameState {
                 };
                 let cached = CachedRenderData { matrix: t.to_matrix().to_cols_array_2d(), color, mesh_group };
                 let health = 80.0 + (scale.x + scale.y + scale.z) * 25.0;
+                let body = self.physics.add_static_body_with_rotation(t.position, t.rotation);
+                let collider = self.physics.add_static_env_box_collider(body, t.scale * 0.5);
+                let phys = DestructiblePhysics { body_handle: body, collider_handle: collider };
                 self.world.spawn((
                     t,
                     Destructible::new(health, 5, 0.25),
                     BiomeLandmark { landmark_type: *landmark_type },
                     cached,
+                    phys,
                 ));
             }
         }
@@ -5383,12 +6084,16 @@ impl GameState {
                 };
                 let cached = CachedRenderData { matrix: t.to_matrix().to_cols_array_2d(), color, mesh_group };
                 let health = 100.0 + (scale.x + scale.y + scale.z) * 35.0;
+                let body = self.physics.add_static_body_with_rotation(t.position, t.rotation);
+                let collider = self.physics.add_static_env_box_collider(body, t.scale * 0.5);
+                let phys = DestructiblePhysics { body_handle: body, collider_handle: collider };
                 self.world.spawn((
                     t,
                     Destructible::new(health, 8, 0.3),
                     BiomeDestructible { landmark_type: *landmark_type },
                     ChainReaction { radius: chain_radius, damage: chain_damage, effect: chain_effect },
                     cached,
+                    phys,
                 ));
             }
         }
@@ -5441,6 +6146,9 @@ impl GameState {
     fn arrive_at_system(&mut self, system_idx: usize) {
         self.current_system_idx = system_idx;
         self.current_system = self.universe.generate_system(system_idx);
+        // Randomize orbital phase so each system (and each visit) shows different planet positions
+        let seed = self.current_system.seed;
+        self.orbital_time = ((seed % 100000) as f64 * 0.123).rem_euclid(628.0); // ~0..100 orbits worth
         // Initialize war state for the new system
         self.war_state = GalacticWarState::new(self.current_system.bodies.len());
 
@@ -5472,6 +6180,7 @@ impl GameState {
         }
         self.effects = EffectsManager::new();
         self.rain_drops.clear();
+        self.snow_particles.clear();
         self.tracer_projectiles.clear();
         self.last_player_track_pos = None;
         self.ground_track_bug_timer = 0.0;
@@ -5559,19 +6268,16 @@ impl GameState {
                 };
 
                 let star_dir = (star_pos - pos).normalize();
-                // Earth from space: actual Earth colors (blue oceans, white clouds)
-                let (planet_color, atmo_color) = if body.planet.name == "Earth" {
-                    ([0.18, 0.42, 0.72, 0.3], [0.45, 0.65, 0.92, 1.0]) // blue planet, blue-white atmosphere
-                } else {
-                    let biome_cfg = body.planet.get_biome_config();
-                    let pc = biome_cfg.base_color;
-                    ([pc.x, pc.y, pc.z, 0.3], [
-                        body.planet.atmosphere_color.x,
-                        body.planet.atmosphere_color.y,
-                        body.planet.atmosphere_color.z,
-                        if body.ring_system { 1.0 } else { 0.0 },
-                    ])
-                };
+                // Same surface and atmosphere color as in drop pod and on surface (Planet is single source)
+                let surf = body.planet.surface_color();
+                let atmo_rgb = body.planet.atmosphere_color_rgb();
+                let planet_color = [surf[0], surf[1], surf[2], 0.3];
+                let atmo_color = [
+                    atmo_rgb[0],
+                    atmo_rgb[1],
+                    atmo_rgb[2],
+                    if body.ring_system { 1.0 } else { 0.0 },
+                ];
                 instances.push(CelestialBodyInstance {
                     position: pos.into(),
                     radius,
@@ -5728,18 +6434,15 @@ impl GameState {
                 let body_to_star = (-body_pos).normalize();
                 let bts = Vec3::new(body_to_star.x as f32, body_to_star.y as f32, body_to_star.z as f32);
 
-                let (planet_color, atmo_color) = if body.planet.name == "Earth" {
-                    ([0.18, 0.42, 0.72, 0.3], [0.45, 0.65, 0.92, if body.ring_system { 1.0 } else { 0.0 }])
-                } else {
-                    let biome_cfg = body.planet.get_biome_config();
-                    let pc = biome_cfg.base_color;
-                    ([pc.x, pc.y, pc.z, 0.3], [
-                        body.planet.atmosphere_color.x,
-                        body.planet.atmosphere_color.y,
-                        body.planet.atmosphere_color.z,
-                        if body.ring_system { 1.0 } else { 0.0 },
-                    ])
-                };
+                let surf = body.planet.surface_color();
+                let atmo_rgb = body.planet.atmosphere_color_rgb();
+                let planet_color = [surf[0], surf[1], surf[2], 0.3];
+                let atmo_color = [
+                    atmo_rgb[0],
+                    atmo_rgb[1],
+                    atmo_rgb[2],
+                    if body.ring_system { 1.0 } else { 0.0 },
+                ];
 
                 instances.push(CelestialBodyInstance {
                     position: rel_f.into(),
@@ -5896,9 +6599,9 @@ impl GameState {
         let azimuth = t * std::f32::consts::TAU; // full circle
 
         // Sun elevation: peaks at noon (t=0.25), below horizon at night (t=0.75)
-        // Use a sine curve: sin(t * 2pi - pi/2) maps 0.25 → +1, 0.75 → -1
+        // Use a sine curve so night is actually dark (sun below horizon)
         let elev_raw = (t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2).sin();
-        let elevation = elev_raw.max(0.0) * std::f32::consts::FRAC_PI_2 * 0.85;
+        let elevation = elev_raw * std::f32::consts::FRAC_PI_2 * 0.92;
 
         let sun_x = azimuth.cos() * elevation.cos();
         let sun_y = elevation.sin();
@@ -5933,6 +6636,37 @@ impl GameState {
         self.rain_drops.retain(|r| r.life > 0.0);
         if self.rain_drops.len() > 400 {
             self.rain_drops.drain(0..(self.rain_drops.len() - 400));
+        }
+    }
+
+    fn update_snow(&mut self, dt: f32) {
+        let (spawn_rate, fall_speed) = self.weather.snow_params();
+        if spawn_rate > 0 && self.player.is_alive {
+            let cam = self.camera.position();
+            for _ in 0..spawn_rate {
+                let x = cam.x + (rand::random::<f32>() - 0.5) * 35.0;
+                let z = cam.z + (rand::random::<f32>() - 0.5) * 35.0;
+                let y = cam.y + rand::random::<f32>() * 18.0;
+                let size = 0.04 + rand::random::<f32>() * 0.05;
+                self.snow_particles.push(SnowParticle {
+                    position: Vec3::new(x, y, z),
+                    velocity: Vec3::new(
+                        (rand::random::<f32>() - 0.5) * 1.5,
+                        -fall_speed,
+                        (rand::random::<f32>() - 0.5) * 1.5,
+                    ),
+                    life: 4.0,
+                    size,
+                });
+            }
+        }
+        for s in &mut self.snow_particles {
+            s.position += s.velocity * dt;
+            s.life -= dt;
+        }
+        self.snow_particles.retain(|s| s.life > 0.0);
+        if self.snow_particles.len() > 350 {
+            self.snow_particles.drain(0..(self.snow_particles.len() - 350));
         }
     }
 
@@ -6465,7 +7199,7 @@ impl ApplicationHandler for App {
         if self.state.is_none() {
             let config = config::GameConfig::load();
             let window_attrs = Window::default_attributes()
-                .with_title("OpenSST - Starship Troopers FPS [Euphoria Physics]")
+                .with_title("OpenSST")
                 .with_inner_size(winit::dpi::LogicalSize::new(config.window_width, config.window_height));
 
             let window = match event_loop.create_window(window_attrs) {
@@ -6510,7 +7244,7 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     println!("╔══════════════════════════════════════════════════════════════════╗");
-    println!("║         OpenSST - STARSHIP TROOPERS FPS [EUPHORIA PHYSICS]       ║");
+    println!("║                            OpenSST                               ║");
     println!("╠══════════════════════════════════════════════════════════════════╣");
     println!("║  CONTROLS:                                                       ║");
     println!("║    WASD       - Move           │  Mouse      - Look around       ║");

@@ -204,6 +204,75 @@ pub fn build_bug_hole() -> (Vec<Vertex>, Vec<u32>) {
     (v, i)
 }
 
+/// Hive cave / tunnel entrance: arched mouth like Minecraft surface caves.
+/// Wider than tall at the opening; deep recess; irregular organic rim. Y-up, sits on ground.
+pub fn build_hive_cave_entrance() -> (Vec<Vertex>, Vec<u32>) {
+    let mut v = Vec::new();
+    let mut i = Vec::new();
+    let radial_segments = 20;
+    let ring_count = 8;
+    let start_idx = v.len() as u32;
+
+    // Center vertex (deep inside the tunnel)
+    v.push(Vertex::with_color(
+        [0.0, -0.35, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.5, 0.5],
+        WHITE,
+    ));
+
+    for ring in 1..=ring_count {
+        let t = ring as f32 / ring_count as f32;
+        // Elliptical radius: wider than deep (cave mouth shape)
+        let base_rx = 0.25 + t * 0.7;
+        let base_rz = 0.2 + t * 0.55;
+        // Arched profile: top of arch higher (like a tunnel)
+        let arch = (t * std::f32::consts::PI * 0.5).sin();
+        let y = -0.35 + t * 0.4 + arch * 0.25;
+
+        for s in 0..radial_segments {
+            let angle = (s as f32 / radial_segments as f32) * std::f32::consts::TAU;
+            let irregular = 1.0
+                + (angle * 2.0).sin() * 0.12
+                + (angle * 4.0).cos() * 0.06
+                + (t * 3.0).sin() * 0.04;
+            let rx = base_rx * irregular;
+            let rz = base_rz * irregular;
+            let x = rx * angle.cos();
+            let z = rz * angle.sin();
+
+            let to_center = Vec3::new(-x, 0.35 - y, -z).normalize();
+            v.push(Vertex::with_color(
+                [x, y, z],
+                to_center.to_array(),
+                [s as f32 / radial_segments as f32, t],
+                WHITE,
+            ));
+        }
+    }
+
+    for s in 0..radial_segments as u32 {
+        let next_s = (s + 1) % radial_segments;
+        i.push(start_idx);
+        i.push(start_idx + 1 + s);
+        i.push(start_idx + 1 + next_s);
+    }
+    for ring in 0..ring_count - 1 {
+        let curr_base = start_idx + 1 + (ring * radial_segments) as u32;
+        let next_base = curr_base + radial_segments as u32;
+        for s in 0..radial_segments as u32 {
+            let next_s = (s + 1) % radial_segments;
+            i.push(curr_base + s);
+            i.push(next_base + s);
+            i.push(curr_base + next_s);
+            i.push(curr_base + next_s);
+            i.push(next_base + s);
+            i.push(next_base + next_s);
+        }
+    }
+    (v, i)
+}
+
 /// Organic blob for hive mounds, spore towers.
 pub fn build_hive_mound() -> (Vec<Vertex>, Vec<u32>) {
     let mut v = Vec::new();
@@ -285,13 +354,13 @@ pub fn build_egg_cluster() -> (Vec<Vertex>, Vec<u32>) {
     (v, i)
 }
 
-/// Rock variant 1: Angular, fractured.
+/// Rock variant 1: Angular, fractured — more irregular and rock-like (facets, flat-ish base).
 pub fn build_rock() -> (Vec<Vertex>, Vec<u32>) {
     let mut v = Vec::new();
     let mut i = Vec::new();
 
-    let seg = 8usize;
-    let ring = 6usize;
+    let seg = 10usize;
+    let ring = 7usize;
     let start_idx = v.len() as u32;
 
     for r in 0..=ring {
@@ -306,13 +375,16 @@ pub fn build_rock() -> (Vec<Vertex>, Vec<u32>) {
 
             let u = theta / std::f32::consts::TAU;
             let v_ = r as f32 / ring as f32;
-            let deform = 1.0
-                + ((u * 4.0).fract() - 0.5).abs() * 0.3
-                + ((v_ * 3.0).fract() - 0.5).abs() * 0.2
-                + (theta * 2.0 + phi).sin() * 0.1;
+            // Stronger asymmetric deformation: facets and bumps for a fractured look
+            let facet = ((u * 5.0).floor() * 0.12 + (v_ * 4.0).floor() * 0.08).abs();
+            let bump = (theta * 3.0 + phi * 2.0).sin() * 0.15 + (theta * 1.5).cos() * 0.1;
+            let deform = 1.0 + facet + bump;
+            // Flatten bottom so rock sits on ground
+            let bottom_flat = (1.0 - (v_ * 1.4).min(1.0)) * 0.25;
+            let py_scale = 0.85 - bottom_flat;
 
             let px = x * deform;
-            let py = y * deform * 0.9;
+            let py = y * deform * py_scale;
             let pz = z * deform;
             let pos = Vec3::new(px, py, pz);
             let n = pos.normalize();
@@ -343,13 +415,13 @@ pub fn build_rock() -> (Vec<Vertex>, Vec<u32>) {
     (v, i)
 }
 
-/// Rock variant 2: Chunk — flat base, angular top.
+/// Rock variant 2: Chunk — flat base, angular fractured top (broken rock slab).
 pub fn build_rock_chunk() -> (Vec<Vertex>, Vec<u32>) {
     let mut v = Vec::new();
     let mut i = Vec::new();
 
-    let seg = 6usize;
-    let ring = 5usize;
+    let seg = 8usize;
+    let ring = 6usize;
     let start_idx = v.len() as u32;
 
     for r in 0..=ring {
@@ -362,9 +434,12 @@ pub fn build_rock_chunk() -> (Vec<Vertex>, Vec<u32>) {
             let x = ring_r * theta.cos();
             let z = ring_r * theta.sin();
 
-            let deform = 1.0 + (theta * 2.0).sin() * 0.2 + (phi * 4.0).cos() * 0.15;
+            // Angular facets on top, flatter toward base
+            let facet = ((theta * 2.5).floor() * 0.08 + (phi * 3.0).floor() * 0.05).abs();
+            let deform = 1.0 + (theta * 2.0).sin() * 0.22 + (phi * 4.0).cos() * 0.18 + facet;
+            let py_scale = 0.55 - (1.0 - r as f32 / ring as f32) * 0.1; // slightly flatter base
             let px = x * deform;
-            let py = y * deform * 0.6;
+            let py = y * deform * py_scale;
             let pz = z * deform;
 
             let pos = Vec3::new(px, py, pz);
@@ -381,8 +456,9 @@ pub fn build_rock_chunk() -> (Vec<Vertex>, Vec<u32>) {
     let cap_idx = v.len() as u32;
     v.push(Vertex::with_color([0.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.5, 0.5], WHITE));
     let last_ring_base = start_idx + ((ring - 1) * (seg + 1)) as u32;
-    for s in 0..seg as u32 {
-        let next_s = (s + 1) % seg as u32;
+    let seg_u = seg as u32;
+    for s in 0..=seg_u {
+        let next_s = (s + 1) % (seg_u + 1);
         i.push(cap_idx);
         i.push(last_ring_base + next_s);
         i.push(last_ring_base + s);
@@ -405,13 +481,13 @@ pub fn build_rock_chunk() -> (Vec<Vertex>, Vec<u32>) {
     (v, i)
 }
 
-/// Rock variant 3: Boulder — rounder, weathered.
+/// Rock variant 3: Boulder — rounder but irregular (weathered, lumpy).
 pub fn build_rock_boulder() -> (Vec<Vertex>, Vec<u32>) {
     let mut v = Vec::new();
     let mut i = Vec::new();
 
-    let seg = 10usize;
-    let ring = 8usize;
+    let seg = 12usize;
+    let ring = 9usize;
     let start_idx = v.len() as u32;
 
     for r in 0..=ring {
@@ -424,8 +500,14 @@ pub fn build_rock_boulder() -> (Vec<Vertex>, Vec<u32>) {
             let x = ring_r * theta.cos();
             let z = ring_r * theta.sin();
 
-            let deform = 1.0 + (theta * 3.0 + phi * 2.0).sin() * 0.06;
-            let pos = Vec3::new(x * deform, y * deform, z * deform);
+            // Multiple noise scales for lumpy boulder; slight flat bottom
+            let lump = (theta * 3.0 + phi * 2.0).sin() * 0.08
+                + (theta * 5.0 + phi * 3.0).cos() * 0.05
+                + (theta * 1.0 + phi * 4.0).sin() * 0.04;
+            let deform = 1.0 + lump;
+            let bottom = (1.0 - (r as f32 / ring as f32).min(0.5) * 2.0).max(0.0) * 0.12;
+            let py_scale = 1.0 - bottom;
+            let pos = Vec3::new(x * deform, y * deform * py_scale, z * deform);
             let n = pos.normalize();
             v.push(Vertex::with_color(
                 pos.to_array(),
@@ -450,6 +532,71 @@ pub fn build_rock_boulder() -> (Vec<Vertex>, Vec<u32>) {
         }
     }
 
+    (v, i)
+}
+
+/// Add an axis-aligned box (center, half-extents) for building compound meshes.
+fn add_box(
+    v: &mut Vec<Vertex>,
+    i: &mut Vec<u32>,
+    center: [f32; 3],
+    half: [f32; 3],
+) {
+    let [cx, cy, cz] = center;
+    let [hx, hy, hz] = half;
+    let base = v.len() as u32;
+    // 24 vertices (4 per face, CCW from outside) — same order as renderer cube
+    let mut add = |pos: [f32; 3], n: [f32; 3], uv: [f32; 2]| {
+        v.push(Vertex::with_color(pos, n, uv, WHITE));
+    };
+    add([cx + hx, cy - hy, cz + hz], [1.0, 0.0, 0.0], [0.0, 1.0]);
+    add([cx + hx, cy - hy, cz - hz], [1.0, 0.0, 0.0], [1.0, 1.0]);
+    add([cx + hx, cy + hy, cz - hz], [1.0, 0.0, 0.0], [1.0, 0.0]);
+    add([cx + hx, cy + hy, cz + hz], [1.0, 0.0, 0.0], [0.0, 0.0]);
+    add([cx - hx, cy - hy, cz - hz], [-1.0, 0.0, 0.0], [0.0, 1.0]);
+    add([cx - hx, cy - hy, cz + hz], [-1.0, 0.0, 0.0], [1.0, 1.0]);
+    add([cx - hx, cy + hy, cz + hz], [-1.0, 0.0, 0.0], [1.0, 0.0]);
+    add([cx - hx, cy + hy, cz - hz], [-1.0, 0.0, 0.0], [0.0, 0.0]);
+    add([cx - hx, cy + hy, cz + hz], [0.0, 1.0, 0.0], [0.0, 1.0]);
+    add([cx + hx, cy + hy, cz + hz], [0.0, 1.0, 0.0], [1.0, 1.0]);
+    add([cx + hx, cy + hy, cz - hz], [0.0, 1.0, 0.0], [1.0, 0.0]);
+    add([cx - hx, cy + hy, cz - hz], [0.0, 1.0, 0.0], [0.0, 0.0]);
+    add([cx - hx, cy - hy, cz - hz], [0.0, -1.0, 0.0], [0.0, 1.0]);
+    add([cx + hx, cy - hy, cz - hz], [0.0, -1.0, 0.0], [1.0, 1.0]);
+    add([cx + hx, cy - hy, cz + hz], [0.0, -1.0, 0.0], [1.0, 0.0]);
+    add([cx - hx, cy - hy, cz + hz], [0.0, -1.0, 0.0], [0.0, 0.0]);
+    add([cx - hx, cy - hy, cz + hz], [0.0, 0.0, 1.0], [0.0, 1.0]);
+    add([cx + hx, cy - hy, cz + hz], [0.0, 0.0, 1.0], [1.0, 1.0]);
+    add([cx + hx, cy + hy, cz + hz], [0.0, 0.0, 1.0], [1.0, 0.0]);
+    add([cx - hx, cy + hy, cz + hz], [0.0, 0.0, 1.0], [0.0, 0.0]);
+    add([cx + hx, cy - hy, cz - hz], [0.0, 0.0, -1.0], [0.0, 1.0]);
+    add([cx - hx, cy - hy, cz - hz], [0.0, 0.0, -1.0], [1.0, 1.0]);
+    add([cx - hx, cy + hy, cz - hz], [0.0, 0.0, -1.0], [1.0, 0.0]);
+    add([cx + hx, cy + hy, cz - hz], [0.0, 0.0, -1.0], [0.0, 0.0]);
+    for face in 0..6u32 {
+        let o = base + face * 4;
+        i.extend([o, o + 1, o + 2, o, o + 2, o + 3]);
+    }
+}
+
+/// Heinlein Skinnies: tall, gaunt humanoids — subjugated race, elongated and thin.
+/// Proportions from the book: "skinny" build, long limbs, small head, narrow torso.
+/// Unit height ~1.0; game scales by SkinnyType. Y-up, standing.
+pub fn build_skinny() -> (Vec<Vertex>, Vec<u32>) {
+    let mut v = Vec::new();
+    let mut i = Vec::new();
+    // Torso: narrow and tall (gaunt, ribby silhouette — very thin in X and Z)
+    add_box(&mut v, &mut i, [0.0, 0.28, 0.0], [0.04, 0.36, 0.025]);
+    // Neck: thin stalk connecting to head
+    add_box(&mut v, &mut i, [0.0, 0.68, 0.0], [0.02, 0.06, 0.018]);
+    // Head: small, elongated (oval — taller than wide), alien
+    add_box(&mut v, &mut i, [0.0, 0.82, 0.0], [0.035, 0.06, 0.03]);
+    // Legs: long thin stalks (Heinlein "spindly")
+    add_box(&mut v, &mut i, [-0.028, -0.22, 0.0], [0.018, 0.24, 0.016]);
+    add_box(&mut v, &mut i, [0.028, -0.22, 0.0], [0.018, 0.24, 0.016]);
+    // Arms: very long and thin (distinctly non-human proportion)
+    add_box(&mut v, &mut i, [-0.07, 0.26, 0.0], [0.012, 0.26, 0.012]);
+    add_box(&mut v, &mut i, [0.07, 0.26, 0.0], [0.012, 0.26, 0.012]);
     (v, i)
 }
 

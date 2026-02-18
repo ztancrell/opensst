@@ -43,6 +43,18 @@ pub enum BiomeType {
     Jungle,
     /// Barren irradiated desert, cracked earth.
     Wasteland,
+    /// Cold grassland, permafrost, wind-scoured.
+    Tundra,
+    /// Bleached salt pans, cracked crust, blinding white.
+    SaltFlat,
+    /// Permanent storms, lightning, heavy rain, low visibility.
+    Storm,
+    /// Alien fungal forests, spores, bioluminescent growth.
+    Fungal,
+    /// Post-nuke / firestorm wasteland, blackened earth, embers.
+    Scorched,
+    /// Ancient ruins, overgrown structures, collapsed megastructures.
+    Ruins,
 }
 
 /// Biome configuration affecting terrain generation.
@@ -201,6 +213,72 @@ impl BiomeConfig {
                 prop_density: 0.2,
                 bug_density: 0.5,
             },
+            // Tundra: cold grassland, permafrost, pale green-grey
+            BiomeType::Tundra => Self {
+                biome_type,
+                base_color: Vec3::new(0.52, 0.58, 0.55),
+                secondary_color: Vec3::new(0.65, 0.72, 0.78),
+                height_scale: 0.6,
+                frequency_scale: 1.15,
+                roughness: 0.35,
+                prop_density: 0.2,
+                bug_density: 0.7,
+            },
+            // SaltFlat: blinding white-grey, cracked crust
+            BiomeType::SaltFlat => Self {
+                biome_type,
+                base_color: Vec3::new(0.88, 0.86, 0.84),
+                secondary_color: Vec3::new(0.72, 0.70, 0.68),
+                height_scale: 0.35,
+                frequency_scale: 1.4,
+                roughness: 0.2,
+                prop_density: 0.1,
+                bug_density: 0.4,
+            },
+            // Storm: dark grey, torrential rain, low vis
+            BiomeType::Storm => Self {
+                biome_type,
+                base_color: Vec3::new(0.28, 0.30, 0.32),
+                secondary_color: Vec3::new(0.22, 0.24, 0.26),
+                height_scale: 0.55,
+                frequency_scale: 1.25,
+                roughness: 0.4,
+                prop_density: 0.35,
+                bug_density: 1.2,
+            },
+            // Fungal: alien mushrooms, purple-green, organic
+            BiomeType::Fungal => Self {
+                biome_type,
+                base_color: Vec3::new(0.28, 0.22, 0.35),
+                secondary_color: Vec3::new(0.38, 0.45, 0.28),
+                height_scale: 1.1,
+                frequency_scale: 0.95,
+                roughness: 0.5,
+                prop_density: 0.85,
+                bug_density: 1.7,
+            },
+            // Scorched: blackened earth, embers, post-fire
+            BiomeType::Scorched => Self {
+                biome_type,
+                base_color: Vec3::new(0.12, 0.11, 0.10),
+                secondary_color: Vec3::new(0.45, 0.28, 0.12),
+                height_scale: 0.5,
+                frequency_scale: 1.2,
+                roughness: 0.35,
+                prop_density: 0.25,
+                bug_density: 0.6,
+            },
+            // Ruins: overgrown stone, decay, ancient structures
+            BiomeType::Ruins => Self {
+                biome_type,
+                base_color: Vec3::new(0.38, 0.36, 0.34),
+                secondary_color: Vec3::new(0.28, 0.35, 0.28),
+                height_scale: 0.9,
+                frequency_scale: 1.1,
+                roughness: 0.55,
+                prop_density: 0.5,
+                bug_density: 1.1,
+            },
         }
     }
 
@@ -215,12 +293,13 @@ impl BiomeConfig {
         !matches!(
             self.biome_type,
             BiomeType::Desert | BiomeType::Volcanic | BiomeType::Ashlands | BiomeType::Wasteland
+                | BiomeType::SaltFlat | BiomeType::Scorched
         )
     }
 }
 
 /// All biome types for iteration.
-pub const ALL_BIOMES: [BiomeType; 12] = [
+pub const ALL_BIOMES: [BiomeType; 18] = [
     BiomeType::Desert,
     BiomeType::Badlands,
     BiomeType::HiveWorld,
@@ -233,6 +312,12 @@ pub const ALL_BIOMES: [BiomeType; 12] = [
     BiomeType::Ashlands,
     BiomeType::Jungle,
     BiomeType::Wasteland,
+    BiomeType::Tundra,
+    BiomeType::SaltFlat,
+    BiomeType::Storm,
+    BiomeType::Fungal,
+    BiomeType::Scorched,
+    BiomeType::Ruins,
 ];
 
 /// Noise-based biome sampler for a planet.
@@ -261,12 +346,12 @@ impl PlanetBiomes {
     }
 
     /// Create a multi-biome planet from a seed.
-    /// Picks 2-4 distinct biome types and builds noise for spatial selection.
+    /// Picks 2-6 distinct biome types so troopers never know what mix they're dropping into.
     pub fn from_seed(seed: u64) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
 
-        // Pick 2-4 distinct biome types
-        let num_biomes = rng.gen_range(2..=4);
+        // Pick 2-6 distinct biome types (more variety, unknown intel)
+        let num_biomes = rng.gen_range(2..=6);
         let mut available = ALL_BIOMES.to_vec();
         // Shuffle and take
         for i in (1..available.len()).rev() {

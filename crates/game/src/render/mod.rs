@@ -20,7 +20,7 @@ use crate::destruction::{
     BugCorpse, BugGoreChunk, CachedRenderData, Debris, Destructible,
     MESH_GROUP_ROCK, MESH_GROUP_BUG_HOLE, MESH_GROUP_EGG_CLUSTER, MESH_GROUP_PROP_SPHERE,
     MESH_GROUP_CUBE, MESH_GROUP_LANDMARK, MESH_GROUP_HAZARD, MESH_GROUP_HIVE_MOUND,
-    MESH_GROUP_BEVELED_CUBE, ENV_MESH_GROUP_COUNT,
+    MESH_GROUP_BEVELED_CUBE, MESH_GROUP_HIVE_CAVE_ENTRANCE, ENV_MESH_GROUP_COUNT,
 };
 use crate::extraction::{ExtractionDropship, ExtractionPhase, roger_young_parts};
 use crate::fleet::{surface_corvette_positions, SURFACE_CORVETTE_PARAMS};
@@ -30,6 +30,7 @@ use crate::squad::{SquadMate, SquadMateKind};
 use crate::weapons::WeaponType;
 use crate::{
     interior_npc_parts, roger_young_interior_npcs, roger_young_interior_parts,
+    state::WeatherState,
     DropPhase, GamePhase, GameState,
 };
 
@@ -47,7 +48,8 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 0.75,                      // night
                 [0.0, -1.0, 0.0],         // sun down
                 0.0, 0.0, 0.0, 0.0, 0.0,  // no clouds/dust/planet, atmo_height=0 = space
-                [0.02, 0.025, 0.04],
+                [0.02, 0.025, 0.04],      // surface (unused in menu)
+                [0.02, 0.025, 0.04],      // atmosphere (dark space)
             );
             state.renderer.render_sky(
                 &mut encoder,
@@ -181,6 +183,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
         let track_visible = state.current_planet_idx.is_some() && matches!(
             primary_biome,
             BiomeType::Desert | BiomeType::Frozen | BiomeType::Wasteland | BiomeType::Badlands
+                | BiomeType::Tundra | BiomeType::SaltFlat
         );
         if track_visible {
             for track in &state.effects.ground_tracks {
@@ -193,8 +196,8 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 let alpha = age_fade * 0.92;
                 // Impression color: darker than surface (snow = shadow, sand = disturbed)
                 let (r, g, b) = match primary_biome {
-                    BiomeType::Frozen => (0.42, 0.48, 0.55),   // shadow in snow/ice
-                    BiomeType::Desert => (0.45, 0.35, 0.24),   // disturbed sand
+                    BiomeType::Frozen | BiomeType::Tundra => (0.42, 0.48, 0.55),   // shadow in snow/ice
+                    BiomeType::Desert | BiomeType::SaltFlat => (0.45, 0.35, 0.24),   // disturbed sand/salt
                     BiomeType::Wasteland => (0.32, 0.28, 0.26), // grey dust
                     BiomeType::Badlands => (0.38, 0.22, 0.14),  // red dirt
                     _ => (0.4, 0.38, 0.35),
@@ -345,27 +348,22 @@ pub fn run(state: &mut GameState) -> Result<()> {
             (400.0 / (biome_fog_mult * 0.5 + 0.5)) * alt_fog_mult, // shorter visibility for thick biomes
         ];
 
-        // Planet surface color for the orbital view and sky horizon
-        // Earth: vivid green/blue so surface and sky feel like homeworld
-        let planet_surface_color: [f32; 3] = if state.planet.name == "Earth" {
-            [0.22, 0.48, 0.32] // green earth + blue tint for horizon
-        } else {
-            let primary_cfg = state.planet.get_biome_config();
-            let primary_col = primary_cfg.base_color;
-            let biomes = &state.chunk_manager.planet_biomes.biomes;
-            let mut secondary_avg = Vec3::ZERO;
-            let mut count = 0;
-            for b in biomes {
-                if *b != state.planet.primary_biome {
-                    let cfg = procgen::BiomeConfig::from_type(*b);
-                    secondary_avg += cfg.base_color;
-                    count += 1;
-                }
-            }
-            if count > 0 { secondary_avg /= count as f32; }
-            let final_col = primary_col * 0.70 + secondary_avg * 0.30;
-            [final_col.x, final_col.y, final_col.z]
-        };
+        // Shadow pass: sun shadow map (only when on planet surface, before any scene passes that sample it)
+        if state.current_planet_idx.is_some()
+            && (state.phase == GamePhase::Playing || state.phase == GamePhase::DropSequence)
+        {
+            state.renderer.update_shadow_light(
+                [sun_dir.x, sun_dir.y, sun_dir.z],
+                [cam_pos.x, cam_pos.y, cam_pos.z],
+                planet_radius,
+            );
+            state.renderer.with_shadow_pass(&mut encoder, |r, pass| {
+                state.chunk_manager.render_visible_shadow(r, pass, &state.camera);
+            });
+        }
+
+        // Planet surface color: same in orbit, during drop, and on surface (single source: Planet)
+        let planet_surface_color: [f32; 3] = state.planet.surface_color();
 
         // Pass 0: Dynamic sky (clears and draws) -- includes planet sphere from orbit
         // Force space background: main menu, extraction orbit, approach flight, or ship interior (real-time view out windows)
@@ -389,6 +387,14 @@ pub fn run(state: &mut GameState) -> Result<()> {
             (atmo_height, cloud_density)
         };
         let biome_dust = dust + (biome_fog_mult - 1.0).max(0.0) * 0.08;
+        // Sky reflects weather: tint atmosphere so Clear=normal, Cloudy/Rain/Storm/Snow = moody grey/blue
+        let tint = state.weather.atmosphere_tint();
+        let atmo = state.planet.atmosphere_color_rgb();
+        let atmosphere_color: [f32; 3] = [
+            atmo[0] * tint[0],
+            atmo[1] * tint[1],
+            atmo[2] * tint[2],
+        ];
         state.renderer.update_sky(
             state.time_of_day,
             [sun_dir.x, sun_dir.y, sun_dir.z],
@@ -398,6 +404,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
             planet_radius,
             sky_atmo_height,
             planet_surface_color,
+            atmosphere_color,
         );
         state.renderer.render_sky(
             &mut encoder,
@@ -1060,17 +1067,40 @@ pub fn run(state: &mut GameState) -> Result<()> {
         {
             let terrain_sun_intensity = sun_dir.y.max(0.0).powf(0.3) * (1.0 - cloud_density * 0.4);
             let primary_biome = state.planet.primary_biome;
-            let deform_enabled = matches!(
+            let tracks_biome = matches!(
                 primary_biome,
                 BiomeType::Desert | BiomeType::Frozen | BiomeType::Wasteland | BiomeType::Badlands
+                    | BiomeType::Tundra | BiomeType::SaltFlat
             );
+            let snow_weather = state.weather.current == WeatherState::Snow;
+            let deform_enabled = tracks_biome || snow_weather;
+            const SNOW_ACCUM_RATE: f32 = 0.08;   // m/s when snowing (knee-deep ~0.45 m in a few seconds)
+            const SNOW_MELT_RATE: f32 = 0.04;   // m/s when clear/rain
+            const SNOW_MAX_DEPTH: f32 = 0.45;   // knee-deep
             let (deform_origin_x, deform_origin_z) = if deform_enabled {
                 let ox = cam_pos.x;
                 let oz = cam_pos.z;
-                // Stamp deformation heightfield from ground tracks (Helldivers 2 / Dune style)
-                state.deformation_buffer.fill(0.0);
                 let world_size = 2.0 * DEFORM_HALF_SIZE;
                 let texels_per_unit = (DEFORM_TEXTURE_SIZE as f32) / world_size;
+
+                // Snow accumulation: same 128m tile as deform; reset buffer when camera moves
+                let prev = state.snow_accumulation_origin;
+                if (ox - prev.0).abs() > 2.0 || (oz - prev.1).abs() > 2.0 {
+                    state.snow_accumulation_buffer.fill(0.0);
+                    state.snow_accumulation_origin = (ox, oz);
+                }
+                let dt = state.smoothed_dt;
+                for idx in 0..state.snow_accumulation_buffer.len() {
+                    let s = &mut state.snow_accumulation_buffer[idx];
+                    if snow_weather {
+                        *s = (*s + SNOW_ACCUM_RATE * dt).min(SNOW_MAX_DEPTH);
+                    } else {
+                        *s = (*s - SNOW_MELT_RATE * dt).max(0.0);
+                    }
+                }
+
+                // Stamp deformation heightfield from ground tracks (Helldivers 2 / Dune style)
+                state.deformation_buffer.fill(0.0);
                 for track in &state.effects.ground_tracks {
                     let (radius, depth) = match track.kind {
                         TrackKind::TrooperFoot => (0.24, 0.07),
@@ -1097,19 +1127,26 @@ pub fn run(state: &mut GameState) -> Result<()> {
                             let dist = (dx * dx + dz * dz).sqrt();
                             if dist < radius {
                                 let t = (dist / radius).min(1.0);
-                                let falloff = 1.0 - t * t * (3.0 - 2.0 * t); // smoothstep
+                                let falloff = 1.0 - t * t * (3.0 - 2.0 * t);
+                                let falloff = falloff * falloff;
                                 let idx = i as usize + j as usize * (DEFORM_TEXTURE_SIZE as usize);
                                 let new_val = state.deformation_buffer[idx] + depth * falloff;
-                                state.deformation_buffer[idx] = new_val.min(0.18); // cap max depression
+                                state.deformation_buffer[idx] = new_val.min(0.18);
+                                // Stamp snow away in footprint so track is a depression in snow
+                                let snow_remove = depth * falloff * 1.5; // remove slightly more snow than deform depth
+                                state.snow_accumulation_buffer[idx] =
+                                    (state.snow_accumulation_buffer[idx] - snow_remove).max(0.0);
                             }
                         }
                     }
                 }
                 state.renderer.upload_terrain_deformation(&state.deformation_buffer);
+                state.renderer.upload_terrain_snow(&state.snow_accumulation_buffer);
                 (ox, oz)
             } else {
                 (0.0, 0.0)
             };
+            let snow_enabled = deform_enabled;
             state.renderer.update_terrain(
                 state.time.elapsed_seconds(),
                 [sun_dir.x, sun_dir.y, sun_dir.z, terrain_sun_intensity],
@@ -1120,6 +1157,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 deform_origin_x,
                 deform_origin_z,
                 deform_enabled,
+                snow_enabled,
             );
             state.chunk_manager.render_visible(
                 &state.renderer,
@@ -1276,12 +1314,15 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     [0.18, 0.42, 0.72, 1.0] // Earth blue (oceans)
                 } else {
                     match state.planet.primary_biome {
-                        BiomeType::Desert | BiomeType::Badlands => [0.7, 0.55, 0.3, 1.0],
-                        BiomeType::Volcanic | BiomeType::Ashlands => [0.35, 0.15, 0.08, 1.0],
-                        BiomeType::Frozen => [0.75, 0.82, 0.9, 1.0],
-                        BiomeType::Swamp | BiomeType::Jungle => [0.25, 0.4, 0.2, 1.0],
+                        BiomeType::Desert | BiomeType::Badlands | BiomeType::SaltFlat => [0.7, 0.55, 0.3, 1.0],
+                        BiomeType::Volcanic | BiomeType::Ashlands | BiomeType::Scorched => [0.35, 0.15, 0.08, 1.0],
+                        BiomeType::Frozen | BiomeType::Tundra => [0.75, 0.82, 0.9, 1.0],
+                        BiomeType::Swamp | BiomeType::Jungle | BiomeType::Fungal => [0.25, 0.4, 0.2, 1.0],
                         BiomeType::Crystalline => [0.4, 0.25, 0.5, 1.0],
                         BiomeType::Toxic | BiomeType::Wasteland => [0.35, 0.4, 0.2, 1.0],
+                        BiomeType::Storm => [0.28, 0.32, 0.38, 1.0],
+                        BiomeType::Ruins | BiomeType::Mountain => [0.4, 0.38, 0.35, 1.0],
+                        BiomeType::HiveWorld => [0.28, 0.22, 0.18, 1.0],
                         _ => [0.35, 0.45, 0.3, 1.0],
                     }
                 };
@@ -1299,8 +1340,8 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     &inst,
                 );
 
-                // Atmosphere halo ring around the planet (Earth = blue glow, others = biome tint)
-                if pod.atmosphere_glow > 0.01 {
+                // Atmosphere halo: use planet's atmosphere color so orbit, drop, and surface match
+                if pod.atmosphere_glow > 0.01 && state.planet.has_atmosphere {
                     let halo_radius = radius * 1.08;
                     let glow = pod.atmosphere_glow;
                     let halo_m = glam::Mat4::from_scale_rotation_translation(
@@ -1308,11 +1349,8 @@ pub fn run(state: &mut GameState) -> Result<()> {
                         Quat::from_rotation_x(0.3),
                         Vec3::new(sphere_pos.x, sphere_pos.y + radius * 0.6, sphere_pos.z),
                     );
-                    let halo_color = if state.planet.name == "Earth" {
-                        [0.35 * glow, 0.55 * glow, 0.95 * glow, glow * 0.5] // Earth blue atmosphere
-                    } else {
-                        [0.4 * glow, 0.6 * glow, 1.5 * glow, glow * 0.5]
-                    };
+                    let atmo = state.planet.atmosphere_color_rgb();
+                    let halo_color = [atmo[0] * glow, atmo[1] * glow, atmo[2] * glow, glow * 0.5];
                     let halo_inst = vec![InstanceData::new(halo_m.to_cols_array_2d(), halo_color)];
                     state.renderer.render_instanced_load(
                         &mut encoder, &scene_view,
@@ -1506,6 +1544,10 @@ pub fn run(state: &mut GameState) -> Result<()> {
         if !env_instances[MESH_GROUP_BEVELED_CUBE as usize].is_empty() {
             state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.beveled_cube, &env_instances[MESH_GROUP_BEVELED_CUBE as usize]);
         }
+        // Mesh group 9: hive cave / tunnel entrance (HiveWorld surface holes)
+        if !env_instances[MESH_GROUP_HIVE_CAVE_ENTRANCE as usize].is_empty() {
+            state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.hive_cave_entrance, &env_instances[MESH_GROUP_HIVE_CAVE_ENTRANCE as usize]);
+        }
         }
 
         // Pass 1l2: Destruction debris (Tac Fighter / explosion flying chunks)
@@ -1639,7 +1681,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
             skinny_instances.push(InstanceData::new(final_transform.to_cols_array_2d(), color));
         }
         if !skinny_instances.is_empty() {
-            state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.rock, &skinny_instances);
+            state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.skinny_mesh, &skinny_instances);
         }
 
         // Pass 2b: Squad mates (deployed with player — simple head + torso)
@@ -1764,18 +1806,35 @@ pub fn run(state: &mut GameState) -> Result<()> {
             );
         }
 
-        // Pass 5b: Rain (tiny elongated spheres falling)
+        // Minecraft-style 2D billboard particles: quad always faces camera (vertical billboard in XZ)
+        let billboard_matrix = |pos: Vec3, scale_x: f32, scale_z: f32| {
+            let dx = cam_pos.x - pos.x;
+            let dz = cam_pos.z - pos.z;
+            let len_sq = dx * dx + dz * dz;
+            let (dir_x, dir_z) = if len_sq > 1e-8 {
+                let inv = 1.0 / len_sq.sqrt();
+                (dx * inv, dz * inv)
+            } else {
+                (1.0, 0.0)
+            };
+            let right = Vec3::new(-dir_z, 0.0, dir_x);
+            let normal = Vec3::new(dir_x, 0.0, dir_z);
+            let up = Vec3::Y;
+            let rot = glam::Mat3::from_cols(right, normal, up);
+            glam::Mat4::from_scale_rotation_translation(
+                Vec3::new(scale_x, 1.0, scale_z),
+                Quat::from_mat3(&rot),
+                pos,
+            )
+        };
+
+        // Pass 5b: Rain (2D billboard quads — thin vertical streak)
         if !state.rain_drops.is_empty() && state.player.is_alive {
             let mut rain_instances: Vec<InstanceData> = Vec::new();
             for r in &state.rain_drops {
                 let alpha = (r.life / 1.0).min(1.0);
                 if alpha < 0.2 { continue; }
-                // Elongated vertically for a raindrop streak effect
-                let matrix = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.015, 0.12, 0.015), // thin and tall
-                    Quat::IDENTITY,
-                    r.position,
-                );
+                let matrix = billboard_matrix(r.position, 0.02, 0.12);
                 rain_instances.push(InstanceData::new(
                     matrix.to_cols_array_2d(),
                     [0.65, 0.75, 0.95, alpha],
@@ -1785,43 +1844,53 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 state.renderer.render_instanced_load(
                     &mut encoder,
                     &scene_view,
-                    &state.environment_meshes.prop_sphere,
+                    &state.environment_meshes.billboard_quad,
                     &rain_instances,
                 );
             }
         }
 
-        // Pass 5c: Ambient dust particles (tiny sphere specks only)
-        // NOTE: Billboard quads can't render semi-transparent on the opaque pipeline,
-        // so all dust renders as tiny sphere specks instead.
+        // Pass 5b2: Snow (2D billboard quads — soft flakes)
+        if !state.snow_particles.is_empty() && state.player.is_alive {
+            let mut snow_instances: Vec<InstanceData> = Vec::new();
+            for s in &state.snow_particles {
+                let alpha = (s.life / 2.0).min(1.0) * 0.9;
+                if alpha < 0.15 { continue; }
+                let matrix = billboard_matrix(s.position, s.size, s.size);
+                snow_instances.push(InstanceData::new(
+                    matrix.to_cols_array_2d(),
+                    [0.95, 0.97, 1.0, alpha],
+                ));
+            }
+            if !snow_instances.is_empty() {
+                state.renderer.render_instanced_load(
+                    &mut encoder,
+                    &scene_view,
+                    &state.environment_meshes.billboard_quad,
+                    &snow_instances,
+                );
+            }
+        }
+
+        // Pass 5c: Ambient dust (2D billboard quads)
         if !state.ambient_dust.particles.is_empty() && state.phase == GamePhase::Playing {
             let mut dust_instances: Vec<InstanceData> = Vec::new();
-
             for p in &state.ambient_dust.particles {
                 let life_frac = (p.life / 4.0).min(1.0);
-                let alpha = life_frac * 0.8; // Higher alpha for opaque pipeline
+                let alpha = life_frac * 0.8;
                 if alpha < 0.2 { continue; }
-                // Slight shimmer: modulate size with a slow sine based on life
                 let shimmer = 1.0 + (p.life * 3.0).sin() * 0.15;
                 let size = p.size * shimmer;
-                // Warm dust color with slight variation per particle
                 let tint = (p.position.x * 7.3 + p.position.z * 11.1).sin() * 0.05;
                 let color = [0.82 + tint, 0.76 + tint, 0.65, alpha];
-
-                // All dust renders as tiny spheres (opaque-friendly)
-                let matrix = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::splat(size),
-                    Quat::IDENTITY,
-                    p.position,
-                );
+                let matrix = billboard_matrix(p.position, size, size);
                 dust_instances.push(InstanceData::new(matrix.to_cols_array_2d(), color));
             }
-
             if !dust_instances.is_empty() {
                 state.renderer.render_instanced_load(
                     &mut encoder,
                     &scene_view,
-                    &state.environment_meshes.prop_sphere,
+                    &state.environment_meshes.billboard_quad,
                     &dust_instances,
                 );
             }
@@ -2658,50 +2727,15 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 6: Viewmodel (M1A4 Morita Rifle) - animated, multi-part composition
-        // Each part is a unit cube scaled/positioned to form the Morita silhouette
+        // Pass 6: Viewmodel (rifle / shotgun / MG / entrenchment shovel) - animated, multi-part composition
+        // Each part is a unit cube scaled/positioned to form the weapon silhouette
         let player_in_boat = state.extraction.as_ref().map_or(false, |e: &ExtractionDropship| e.player_camera_locked());
-        // Show rifle/arms on planet (FPS) — never in noclip or in boat
+        // Show weapon on planet (FPS) — never in noclip or in boat (rifle or shovel)
         let show_viewmodel = (!state.debug.noclip && state.current_planet_idx.is_some())
-            && state.phase == GamePhase::Playing && state.player.is_alive && !player_in_boat
-            && !state.player.is_shovel_equipped();
+            && state.phase == GamePhase::Playing && state.player.is_alive && !player_in_boat;
         if show_viewmodel {
-            // Transform viewmodel from view space to world space using the
-            // inverse of the ACTUAL view matrix. This guarantees a perfect
-            // round-trip: view_matrix * (view_inverse * view_pos) == view_pos,
-            // avoiding drift from quaternion/look-at decomposition mismatches.
             let view_to_world = state.camera.view_matrix().inverse();
-
-            // Base viewmodel position in view space: right, below eye, forward (hip-fire)
-            let base_pos = Vec3::new(0.18, -0.11, -0.38);
-
-            // ADS target: gun pivot position when looking through sights.
-            // Rear sight must align with screen center (0,0,-1). Computed from sight geometry.
-            let ads_target = match state.player.current_weapon().weapon_type {
-                WeaponType::Shotgun => {
-                    // MI-22: bead on vent rib, rear near receiver. Sight line ~(0, 0.02, 0.02) to (0, 0.028, -0.35)
-                    Vec3::new(0.0, -0.025, -0.22)
-                }
-                WeaponType::MachineGun => {
-                    // Morita MG: sight rail along top. Rear ~(0, 0.035, 0.05), front ~(0, 0.035, -0.4)
-                    Vec3::new(0.0, -0.038, -0.25)
-                }
-                _ => {
-                    // M1A4 Morita Rifle: rear sight at (0, 0.042, 0.06), front at (0, 0.042, -0.32).
-                    // For rear at (0, 0, -0.18) on view ray: pivot = (0, 0, -0.18) - (0, 0.042, 0.06)
-                    Vec3::new(0.0, -0.042, -0.24)
-                }
-            };
-
-            // Get animated transform from viewmodel state (sight-aligned ADS)
-            let aim = state.player.aim_progress;
-            let (anim_offset, anim_rot) = state.viewmodel_anim.compute_transform(aim, base_pos, ads_target);
-
-            // Final animated base position and rotation
-            let gun_pos = base_pos + anim_offset;
-            let gun_rot = anim_rot;
-
-            // Helper: viewmodel part (offset, scale, color). Barrel points along -Z.
+            // Helper: viewmodel part (offset, scale, color). For guns barrel points along -Z.
             struct GunPart {
                 offset: [f32; 3],
                 scale: [f32; 3],
@@ -2709,7 +2743,48 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
             let mut viewmodel_instances: Vec<InstanceData> = Vec::new();
 
-            let (parts, muzzle_offset) = if state.player.current_weapon().weapon_type == WeaponType::Shotgun {
+            if state.player.is_shovel_equipped() {
+                // Entrenchment shovel: held in both hands, blade down. Same cube-instance pipeline.
+                let base_pos = Vec3::new(0.12, -0.14, -0.34);
+                let aim = 0.0;
+                let (anim_offset, anim_rot) = state.viewmodel_anim.compute_transform(aim, base_pos, base_pos);
+                let shovel_pos = base_pos + anim_offset;
+                let blade_tilt = Quat::from_rotation_x(-0.5);
+                let shovel_rot = anim_rot * blade_tilt;
+
+                let shovel_parts: &[GunPart] = &[
+                    GunPart { offset: [0.0, 0.0, -0.12], scale: [0.018, 0.018, 0.26], color: [0.18, 0.15, 0.12, 1.0] }, // handle
+                    GunPart { offset: [0.0, 0.0, -0.28], scale: [0.10, 0.012, 0.07], color: [0.32, 0.32, 0.35, 1.0] },   // blade
+                    GunPart { offset: [0.0, 0.0, 0.04], scale: [0.028, 0.038, 0.03], color: [0.14, 0.12, 0.10, 1.0] },   // grip
+                ];
+                for part in shovel_parts {
+                    let part_offset = Vec3::new(part.offset[0], part.offset[1], part.offset[2]);
+                    let part_scale = Vec3::new(part.scale[0], part.scale[1], part.scale[2]);
+                    let rotated_offset = shovel_rot * part_offset;
+                    let view_pos = shovel_pos + rotated_offset;
+                    let view_mat = glam::Mat4::from_scale_rotation_translation(
+                        part_scale, shovel_rot, view_pos,
+                    );
+                    let world_mat = view_to_world * view_mat;
+                    viewmodel_instances.push(InstanceData::new(world_mat.to_cols_array_2d(), part.color));
+                }
+            } else {
+                // Base viewmodel position in view space: right, below eye, forward (hip-fire)
+                let base_pos = Vec3::new(0.18, -0.11, -0.38);
+
+                // ADS target: gun pivot position when looking through sights.
+                let ads_target = match state.player.current_weapon().weapon_type {
+                    WeaponType::Shotgun => Vec3::new(0.0, -0.025, -0.22),
+                    WeaponType::MachineGun => Vec3::new(0.0, -0.038, -0.25),
+                    _ => Vec3::new(0.0, -0.042, -0.24),
+                };
+
+                let aim = state.player.aim_progress;
+                let (anim_offset, anim_rot) = state.viewmodel_anim.compute_transform(aim, base_pos, ads_target);
+                let gun_pos = base_pos + anim_offset;
+                let gun_rot = anim_rot;
+
+                let (parts, muzzle_offset) = if state.player.current_weapon().weapon_type == WeaponType::Shotgun {
                 // MI-22 Tactical Shotgun — pump-action, short barrel, stock
                 let shotgun_parts: &[GunPart] = &[
                     GunPart { offset: [0.0, 0.0, 0.02], scale: [0.040, 0.038, 0.14], color: [0.20, 0.20, 0.22, 1.0] }, // receiver
@@ -2777,47 +2852,45 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 viewmodel_instances.push(InstanceData::new(world_mat.to_cols_array_2d(), part.color));
             }
 
-            // === MUZZLE FLASH (when firing) ===
-            if state.viewmodel_anim.fire_flash_timer < 0.06 {
-                let flash_t = state.viewmodel_anim.fire_flash_timer / 0.06;
-                let flash_intensity = (1.0 - flash_t).max(0.0);
-                let flash_size = 0.025 + flash_intensity * 0.02;
+                // === MUZZLE FLASH (when firing) ===
+                if state.viewmodel_anim.fire_flash_timer < 0.06 {
+                    let flash_t = state.viewmodel_anim.fire_flash_timer / 0.06;
+                    let flash_intensity = (1.0 - flash_t).max(0.0);
+                    let flash_size = 0.025 + flash_intensity * 0.02;
 
-                // Muzzle position (rifle or shotgun, set above)
-                let muzzle_view = gun_pos + gun_rot * muzzle_offset;
+                    let muzzle_view = gun_pos + gun_rot * muzzle_offset;
 
-                let flash_color = [
-                    2.0 + flash_intensity * 3.0,
-                    1.5 + flash_intensity * 2.0,
-                    0.5 + flash_intensity * 1.0,
-                    1.0,
-                ];
+                    let flash_color = [
+                        2.0 + flash_intensity * 3.0,
+                        1.5 + flash_intensity * 2.0,
+                        0.5 + flash_intensity * 1.0,
+                        1.0,
+                    ];
 
-                let rot_angle = state.time.elapsed_seconds() * 137.0;
-                let flash_rot = gun_rot * Quat::from_rotation_z(rot_angle);
+                    let rot_angle = state.time.elapsed_seconds() * 137.0;
+                    let flash_rot = gun_rot * Quat::from_rotation_z(rot_angle);
 
-                // Build in view space, then transform to world
-                let flash_view = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::splat(flash_size), flash_rot, muzzle_view,
-                );
-                let flash_world = view_to_world * flash_view;
-                viewmodel_instances.push(InstanceData::new(flash_world.to_cols_array_2d(), flash_color));
+                    let flash_view = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::splat(flash_size), flash_rot, muzzle_view,
+                    );
+                    let flash_world = view_to_world * flash_view;
+                    viewmodel_instances.push(InstanceData::new(flash_world.to_cols_array_2d(), flash_color));
 
-                // Secondary flash (slightly larger, dimmer, orange)
-                let flash2_size = flash_size * 1.8;
-                let flash2_color = [
-                    1.5 * flash_intensity,
-                    0.6 * flash_intensity,
-                    0.1 * flash_intensity,
-                    flash_intensity * 0.8,
-                ];
-                let flash2_rot = gun_rot * Quat::from_rotation_z(rot_angle + 1.0);
-                let flash2_view = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::splat(flash2_size), flash2_rot,
-                    muzzle_view + gun_rot * Vec3::new(0.0, 0.0, -0.01),
-                );
-                let flash2_world = view_to_world * flash2_view;
-                viewmodel_instances.push(InstanceData::new(flash2_world.to_cols_array_2d(), flash2_color));
+                    let flash2_size = flash_size * 1.8;
+                    let flash2_color = [
+                        1.5 * flash_intensity,
+                        0.6 * flash_intensity,
+                        0.1 * flash_intensity,
+                        flash_intensity * 0.8,
+                    ];
+                    let flash2_rot = gun_rot * Quat::from_rotation_z(rot_angle + 1.0);
+                    let flash2_view = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::splat(flash2_size), flash2_rot,
+                        muzzle_view + gun_rot * Vec3::new(0.0, 0.0, -0.01),
+                    );
+                    let flash2_world = view_to_world * flash2_view;
+                    viewmodel_instances.push(InstanceData::new(flash2_world.to_cols_array_2d(), flash2_color));
+                }
             }
 
             if !viewmodel_instances.is_empty() {

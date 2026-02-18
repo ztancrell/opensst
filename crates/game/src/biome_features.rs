@@ -53,13 +53,19 @@ pub fn get_biome_feature_table(biome: BiomeType) -> BiomeFeatureTable {
         },
         BiomeType::HiveWorld => BiomeFeatureTable {
             landmarks: vec![
-                (ResinNode, 25, 50),       // Living hive: resin everywhere
-                (PulsingEggWall, 14, 28),  // Egg clusters on walls
-                (OrganicTunnel, 10, 22),   // Bug-carved passages
+                (ResinNode, 25, 50),         // Living hive: resin everywhere
+                (PulsingEggWall, 14, 28),    // Egg clusters on walls
+                (OrganicTunnel, 10, 22),     // Bug-carved passages
                 (CaveEntrance, 6, 14),
+                (HiveCaveEntrance, 12, 28),  // Big surface tunnel mouths (eggs, nests, holes)
             ],
             hazards: vec![(SporeBurst, 8, 18)],
-            destructibles: vec![(ResinNode, 8, 18)],
+            destructibles: vec![
+                (ResinNode, 8, 18),
+                (PulsingEggWall, 6, 14),     // Chain-pop egg goo
+                (OrganicTunnel, 6, 12),     // Collapse
+                (HiveCaveEntrance, 8, 18),  // Collapse
+            ],
             bug_variant: Some(BugVariant::BroodMother),
             variant_chance: 0.2,
         },
@@ -170,6 +176,77 @@ pub fn get_biome_feature_table(biome: BiomeType) -> BiomeFeatureTable {
             destructibles: vec![(RustedVehicle, 4, 12)],
             bug_variant: Some(BugVariant::Irradiated),
             variant_chance: 0.2,
+        },
+        BiomeType::Tundra => BiomeFeatureTable {
+            landmarks: vec![
+                (IcePillar, 22, 45),
+                (FrozenLake, 10, 22),
+                (GlacialRidge, 14, 30),
+                (CaveEntrance, 0, 6),
+            ],
+            hazards: vec![(Blizzard, 3, 8), (IceCrack, 4, 10)],
+            destructibles: vec![(IcePillar, 6, 16)],
+            bug_variant: Some(BugVariant::FrostBug),
+            variant_chance: 0.22,
+        },
+        BiomeType::SaltFlat => BiomeFeatureTable {
+            landmarks: vec![
+                (SandDuneRidge, 12, 28),
+                (DriedRavine, 20, 45),
+                (CanyonWall, 8, 18),
+                (CaveEntrance, 0, 4),
+            ],
+            hazards: vec![(Sandstorm, 3, 8)],
+            destructibles: vec![(RockArch, 2, 8)],
+            bug_variant: Some(BugVariant::Burrower),
+            variant_chance: 0.2,
+        },
+        BiomeType::Storm => BiomeFeatureTable {
+            landmarks: vec![
+                (FogBank, 25, 50),
+                (WaterfallCliff, 8, 20),
+                (MuddyPool, 12, 28),
+                (CaveEntrance, 4, 12),
+            ],
+            hazards: vec![(Blizzard, 6, 14), (Quicksand, 4, 10)],
+            destructibles: vec![(BoulderField, 4, 12)],
+            bug_variant: Some(BugVariant::SwampLurker),
+            variant_chance: 0.24,
+        },
+        BiomeType::Fungal => BiomeFeatureTable {
+            landmarks: vec![
+                (MutantGrowth, 40, 75),
+                (VineWall, 35, 65),
+                (BioluminescentFlower, 50, 95),
+                (CaveEntrance, 2, 8),
+            ],
+            hazards: vec![(SporeBurst, 10, 22), (PoisonGas, 6, 14)],
+            destructibles: vec![(MutantGrowth, 10, 22)],
+            bug_variant: Some(BugVariant::JungleLeaper),
+            variant_chance: 0.26,
+        },
+        BiomeType::Scorched => BiomeFeatureTable {
+            landmarks: vec![
+                (EmberMound, 20, 40),
+                (AshDrift, 18, 36),
+                (CollapsedRuin, 10, 22),
+                (CaveEntrance, 2, 8),
+            ],
+            hazards: vec![(EmberStorm, 6, 14), (LavaFlow, 2, 8)],
+            destructibles: vec![(EmberMound, 8, 18)],
+            bug_variant: Some(BugVariant::AshStalker),
+            variant_chance: 0.23,
+        },
+        BiomeType::Ruins => BiomeFeatureTable {
+            landmarks: vec![
+                (CollapsedRuin, 25, 50),
+                (RockArch, 14, 30),
+                (CaveEntrance, 12, 28),
+            ],
+            hazards: vec![(Rockslide, 5, 12), (RadiationZone, 3, 8)],
+            destructibles: vec![(CollapsedRuin, 6, 16)],
+            bug_variant: Some(BugVariant::AmbushWarrior),
+            variant_chance: 0.22,
         },
     }
 }

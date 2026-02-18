@@ -61,6 +61,12 @@ pub struct Planet {
     pub visual_radius_value: f32,
     /// Whether Skinnies (Heinlein alien faction) are present — adds humanoid enemies on some worlds.
     pub has_skinnies: bool,
+    /// If true, war table shows "???" for biomes/danger until drop — troopers have no intel.
+    pub has_unknown_intel: bool,
+    /// Gravity multiplier (0.85–1.2). Affects jump/fall feel.
+    pub gravity_mult: f32,
+    /// Day length multiplier (0.5–2.0). Affects time-of-day cycle.
+    pub day_length_mult: f32,
 }
 
 /// Planet size categories.
@@ -110,9 +116,12 @@ impl Planet {
             galaxy_position: Vec3::ZERO,
             liberated: false,
             has_atmosphere: true,
-            atmosphere_color: Vec3::new(0.92, 0.55, 0.22), // Starship Troopers orange-amber sky
+            atmosphere_color: Vec3::new(0.35, 0.55, 0.92), // Earth: natural blue atmosphere
             visual_radius_value: 420.0,
             has_skinnies: false,
+            has_unknown_intel: false,
+            gravity_mult: 1.0,
+            day_length_mult: 1.0,
         }
     }
 
@@ -132,72 +141,80 @@ impl Planet {
             _ => PlanetClassification::Abandoned,
         };
 
-        // Generate name from classification and biome (Starship Troopers / Federation style)
+        // Generate name from classification (Starship Troopers / Federation style)
         let name = Self::generate_name(seed, classification, &mut rng);
 
-        // Determine biomes
+        // Determine biomes — fully random so every world is a surprise
         let primary_biome = BiomeConfig::random(seed);
-        let secondary_biome = if rng.gen_bool(0.6) {
+        let secondary_biome = if rng.gen_bool(0.65) {
             Some(BiomeConfig::random(seed.wrapping_add(12345)))
         } else {
             None
         };
 
-        // Determine stats
+        // Stats: wide ranges so danger and infestation feel unpredictable
         let danger_level = rng.gen_range(1..=10);
-        let infestation = rng.gen_range(0.3..1.5);
+        let infestation = rng.gen_range(0.2..1.8);
 
         let size = match rng.gen_range(0..100) {
-            0..=20 => PlanetSize::Small,
-            21..=60 => PlanetSize::Medium,
-            61..=85 => PlanetSize::Large,
+            0..=25 => PlanetSize::Small,
+            26..=55 => PlanetSize::Medium,
+            56..=82 => PlanetSize::Large,
             _ => PlanetSize::Massive,
         };
 
         // Galaxy position (for star map)
         let galaxy_position = Vec3::new(
-            rng.gen_range(-100.0..100.0),
-            rng.gen_range(-20.0..20.0),
-            rng.gen_range(-100.0..100.0),
+            rng.gen_range(-120.0..120.0),
+            rng.gen_range(-25.0..25.0),
+            rng.gen_range(-120.0..120.0),
         );
 
-        // Atmosphere: most planets have one, some small/dead ones don't
+        // Atmosphere: random per planet type
         let has_atmosphere = match primary_biome {
-            BiomeType::Volcanic | BiomeType::Ashlands => rng.gen_bool(0.7),
+            BiomeType::Volcanic | BiomeType::Ashlands | BiomeType::Scorched => rng.gen_bool(0.65),
             BiomeType::Toxic | BiomeType::Wasteland => rng.gen_bool(0.5),
-            BiomeType::Crystalline => rng.gen_bool(0.6),
-            _ => rng.gen_bool(0.9),
+            BiomeType::Crystalline | BiomeType::SaltFlat => rng.gen_bool(0.55),
+            BiomeType::Storm => true, // Storm worlds always have thick atmosphere
+            _ => rng.gen_bool(0.88),
         };
 
-        // Atmosphere color derived from biome
+        // Atmosphere color: derive from biome then randomize tint so no two planets look the same
         let atmosphere_color = if has_atmosphere {
             let biome_cfg = BiomeConfig::from_type(primary_biome);
             let base = biome_cfg.base_color;
-            // Blend biome color with sky blue for a tinted atmosphere
+            let tint = (rng.gen::<f32>() * 0.25 + 0.85, rng.gen::<f32>() * 0.2 + 0.9, rng.gen::<f32>() * 0.2 + 0.85);
             Vec3::new(
-                (base[0] * 0.3 + 0.4).min(1.0),
-                (base[1] * 0.3 + 0.5).min(1.0),
-                (base[2] * 0.3 + 0.7).min(1.0),
-            )
+                (base[0] * 0.35 + 0.35) * tint.0,
+                (base[1] * 0.35 + 0.45) * tint.1,
+                (base[2] * 0.35 + 0.6) * tint.2,
+            ).min(Vec3::ONE)
         } else {
             Vec3::ZERO
         };
 
-        // Visual radius scales with planet size
+        // Visual radius: more variance per size class
         let visual_radius_value = match size {
-            PlanetSize::Small => 150.0 + rng.gen::<f32>() * 50.0,
-            PlanetSize::Medium => 250.0 + rng.gen::<f32>() * 100.0,
-            PlanetSize::Large => 400.0 + rng.gen::<f32>() * 150.0,
-            PlanetSize::Massive => 600.0 + rng.gen::<f32>() * 200.0,
+            PlanetSize::Small => 140.0 + rng.gen::<f32>() * 70.0,
+            PlanetSize::Medium => 230.0 + rng.gen::<f32>() * 120.0,
+            PlanetSize::Large => 380.0 + rng.gen::<f32>() * 180.0,
+            PlanetSize::Massive => 550.0 + rng.gen::<f32>() * 250.0,
         };
 
-        // Skinnies (Heinlein): humanoid aliens on contested/frontier/abandoned worlds
+        // Skinnies: humanoid aliens on contested/frontier/abandoned worlds
         let has_skinnies = match classification {
             PlanetClassification::HiveWorld => false,
-            PlanetClassification::Frontier | PlanetClassification::WarZone | PlanetClassification::Abandoned => rng.gen_bool(0.65),
-            PlanetClassification::Colony | PlanetClassification::Outpost => rng.gen_bool(0.4),
-            PlanetClassification::Industrial | PlanetClassification::Research => rng.gen_bool(0.25),
+            PlanetClassification::Frontier | PlanetClassification::WarZone | PlanetClassification::Abandoned => rng.gen_bool(0.7),
+            PlanetClassification::Colony | PlanetClassification::Outpost => rng.gen_bool(0.45),
+            PlanetClassification::Industrial | PlanetClassification::Research => rng.gen_bool(0.28),
         };
+
+        // Intel unknown: troopers have no idea what biomes/danger they're dropping into
+        let has_unknown_intel = rng.gen_bool(0.45);
+
+        // Gravity and day length: random so each world feels different
+        let gravity_mult = 0.85 + rng.gen::<f32>() * 0.35;
+        let day_length_mult = 0.5 + rng.gen::<f32>() * 1.5;
 
         Self {
             seed,
@@ -214,6 +231,9 @@ impl Planet {
             atmosphere_color,
             visual_radius_value,
             has_skinnies,
+            has_unknown_intel,
+            gravity_mult,
+            day_length_mult,
         }
     }
 
@@ -290,6 +310,31 @@ impl Planet {
     /// Get the biome configuration for this planet's primary biome.
     pub fn get_biome_config(&self) -> BiomeConfig {
         BiomeConfig::from_type(self.primary_biome)
+    }
+
+    /// Canonical planet surface/terrain color for consistent display in orbit, drop pod, and on surface.
+    pub fn surface_color(&self) -> [f32; 3] {
+        if self.name == "Earth" {
+            return [0.22, 0.48, 0.32]; // Green earth + blue tint for horizon
+        }
+        let primary = BiomeConfig::from_type(self.primary_biome).base_color;
+        let blended = match self.secondary_biome {
+            Some(sec) => {
+                let secondary = BiomeConfig::from_type(sec).base_color;
+                primary * 0.7 + secondary * 0.3
+            }
+            None => primary,
+        };
+        [blended.x, blended.y, blended.z]
+    }
+
+    /// Atmosphere color as [r, g, b] for sky, drop-pod halo, and horizon. Same everywhere.
+    pub fn atmosphere_color_rgb(&self) -> [f32; 3] {
+        [
+            self.atmosphere_color.x,
+            self.atmosphere_color.y,
+            self.atmosphere_color.z,
+        ]
     }
 
     /// Create a noise-based multi-biome sampler for this planet.

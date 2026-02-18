@@ -2,12 +2,18 @@
 
 use crate::collision::CollisionGroup;
 use engine_core::{Transform, Vec3};
-use rapier3d::na::{Isometry3, Vector3};
+use rapier3d::na::{Isometry3, Quaternion, UnitQuaternion, Vector3};
 use rapier3d::prelude::*;
 
 /// Environment collision groups so static geometry (terrain, roads, buildings) collides with player/enemies.
 fn env_collision_groups() -> InteractionGroups {
     let (membership, filter) = CollisionGroup::environment();
+    InteractionGroups::new(membership, filter)
+}
+
+/// Debris collision groups (shell casings, small props) — collide with terrain and other debris.
+fn debris_collision_groups() -> InteractionGroups {
+    let (membership, filter) = CollisionGroup::debris();
     InteractionGroups::new(membership, filter)
 }
 
@@ -100,7 +106,26 @@ impl PhysicsWorld {
         self.rigid_body_set.insert(rigid_body)
     }
 
-    /// Add a box collider to a rigid body.
+    /// Add a static rigid body at position with rotation (for rocks, destructibles).
+    /// Use with add_static_env_box_collider so the collider uses environment collision groups.
+    pub fn add_static_body_with_rotation(
+        &mut self,
+        position: Vec3,
+        rotation: glam::Quat,
+    ) -> RigidBodyHandle {
+        let tra = vector![position.x, position.y, position.z];
+        let quat_na =
+            UnitQuaternion::from_quaternion(Quaternion::new(rotation.w, rotation.x, rotation.y, rotation.z));
+        let rot_vec = quat_na
+            .axis_angle()
+            .map(|(axis, angle)| axis.into_inner() * angle)
+            .unwrap_or_else(|| vector![0.0, 0.0, 0.0]);
+        let iso = Isometry3::new(tra, rot_vec);
+        let rigid_body = RigidBodyBuilder::fixed().position(iso).build();
+        self.rigid_body_set.insert(rigid_body)
+    }
+
+    /// Add a box collider to a rigid body (default collision groups).
     pub fn add_box_collider(
         &mut self,
         body_handle: RigidBodyHandle,
@@ -108,6 +133,22 @@ impl PhysicsWorld {
     ) -> ColliderHandle {
         let collider = ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
             .build();
+        self.collider_set.insert_with_parent(collider, body_handle, &mut self.rigid_body_set)
+    }
+
+    /// Add a box collider to a rigid body with environment collision groups (rocks, destructibles).
+    pub fn add_static_env_box_collider(
+        &mut self,
+        body_handle: RigidBodyHandle,
+        half_extents: Vec3,
+    ) -> ColliderHandle {
+        let collider = ColliderBuilder::cuboid(
+            half_extents.x as Real,
+            half_extents.y as Real,
+            half_extents.z as Real,
+        )
+        .collision_groups(env_collision_groups())
+        .build();
         self.collider_set.insert_with_parent(collider, body_handle, &mut self.rigid_body_set)
     }
 
@@ -130,6 +171,46 @@ impl PhysicsWorld {
     ) -> ColliderHandle {
         let collider = ColliderBuilder::capsule_y(half_height, radius).build();
         self.collider_set.insert_with_parent(collider, body_handle, &mut self.rigid_body_set)
+    }
+
+    /// Add a small sphere collider with debris collision group (shell casings, etc.).
+    pub fn add_debris_sphere_collider(
+        &mut self,
+        body_handle: RigidBodyHandle,
+        radius: f32,
+    ) -> ColliderHandle {
+        let collider = ColliderBuilder::ball(radius)
+            .collision_groups(debris_collision_groups())
+            .build();
+        self.collider_set.insert_with_parent(collider, body_handle, &mut self.rigid_body_set)
+    }
+
+    /// Add a dynamic body for an ejected shell casing (position, rotation, velocities) and a small debris sphere.
+    /// Returns (body_handle, collider_handle). Use for persistent, physics-driven shell casings.
+    pub fn add_shell_casing_body(
+        &mut self,
+        position: Vec3,
+        rotation: glam::Quat,
+        lin_vel: Vec3,
+        ang_vel: Vec3,
+        radius: f32,
+    ) -> (RigidBodyHandle, ColliderHandle) {
+        let tra = vector![position.x, position.y, position.z];
+        let quat_na =
+            UnitQuaternion::from_quaternion(Quaternion::new(rotation.w, rotation.x, rotation.y, rotation.z));
+        let rot_vec = quat_na
+            .axis_angle()
+            .map(|(axis, angle)| axis.into_inner() * angle)
+            .unwrap_or_else(|| vector![0.0, 0.0, 0.0]);
+        let iso = Isometry3::new(tra, rot_vec);
+        let rigid_body = RigidBodyBuilder::dynamic()
+            .position(iso)
+            .linvel(vector![lin_vel.x, lin_vel.y, lin_vel.z])
+            .angvel(vector![ang_vel.x, ang_vel.y, ang_vel.z])
+            .build();
+        let body_handle = self.rigid_body_set.insert(rigid_body);
+        let collider_handle = self.add_debris_sphere_collider(body_handle, radius);
+        (body_handle, collider_handle)
     }
 
     /// Add a ground plane collider (flat Y=0 half-space).
@@ -249,6 +330,16 @@ impl PhysicsWorld {
                 scale: Vec3::ONE,
             }
         })
+    }
+
+    /// Get linear velocity of a rigid body (for shell casing settle check).
+    pub fn get_body_linvel(&self, handle: RigidBodyHandle) -> Option<Vec3> {
+        self.rigid_body_set
+            .get(handle)
+            .map(|body| {
+                let v = body.linvel();
+                Vec3::new(v.x, v.y, v.z)
+            })
     }
 
     /// Set the position of a kinematic body.

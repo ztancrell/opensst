@@ -221,6 +221,82 @@ impl BiomeAtmoConfig {
                 fog_density_mult: 1.5,
                 ambient_tint: [0.8, 0.7, 0.5],
             },
+            BiomeType::Tundra => Self {
+                particles: vec![
+                    (AtmoParticleKind::IceCrystal, 2.5),
+                    (AtmoParticleKind::SandGrain, 1.5),
+                    (AtmoParticleKind::FogBank, 0.8),
+                    (AtmoParticleKind::MistTendril, 0.6),
+                ],
+                spawn_rate: 6.0,
+                max_particles: 90,
+                fog_tint: [0.68, 0.75, 0.82],
+                fog_density_mult: 1.3,
+                ambient_tint: [0.82, 0.86, 0.92],
+            },
+            BiomeType::SaltFlat => Self {
+                particles: vec![
+                    (AtmoParticleKind::SandGrain, 4.0),
+                    (AtmoParticleKind::GodRay, 1.0),
+                    (AtmoParticleKind::FogBank, 0.2),
+                ],
+                spawn_rate: 5.0,
+                max_particles: 70,
+                fog_tint: [0.9, 0.88, 0.85],
+                fog_density_mult: 0.9,
+                ambient_tint: [1.0, 0.98, 0.95],
+            },
+            BiomeType::Storm => Self {
+                particles: vec![
+                    (AtmoParticleKind::FogBank, 4.0),
+                    (AtmoParticleKind::MistTendril, 3.0),
+                    (AtmoParticleKind::RadiationSpark, 0.8),
+                    (AtmoParticleKind::GodRay, 0.3),
+                ],
+                spawn_rate: 14.0,
+                max_particles: 180,
+                fog_tint: [0.35, 0.38, 0.42],
+                fog_density_mult: 2.4,
+                ambient_tint: [0.5, 0.52, 0.55],
+            },
+            BiomeType::Fungal => Self {
+                particles: vec![
+                    (AtmoParticleKind::Spore, 4.0),
+                    (AtmoParticleKind::Firefly, 3.0),
+                    (AtmoParticleKind::ToxicGas, 1.0),
+                    (AtmoParticleKind::MistTendril, 1.5),
+                ],
+                spawn_rate: 11.0,
+                max_particles: 150,
+                fog_tint: [0.45, 0.35, 0.5],
+                fog_density_mult: 1.7,
+                ambient_tint: [0.65, 0.55, 0.75],
+            },
+            BiomeType::Scorched => Self {
+                particles: vec![
+                    (AtmoParticleKind::Ember, 5.0),
+                    (AtmoParticleKind::Ash, 4.0),
+                    (AtmoParticleKind::FogBank, 1.0),
+                ],
+                spawn_rate: 13.0,
+                max_particles: 165,
+                fog_tint: [0.4, 0.28, 0.2],
+                fog_density_mult: 1.9,
+                ambient_tint: [0.7, 0.45, 0.3],
+            },
+            BiomeType::Ruins => Self {
+                particles: vec![
+                    (AtmoParticleKind::SandGrain, 1.5),
+                    (AtmoParticleKind::FogBank, 1.2),
+                    (AtmoParticleKind::MistTendril, 0.8),
+                    (AtmoParticleKind::RadiationSpark, 0.5),
+                ],
+                spawn_rate: 5.0,
+                max_particles: 85,
+                fog_tint: [0.5, 0.48, 0.46],
+                fog_density_mult: 1.4,
+                ambient_tint: [0.75, 0.72, 0.68],
+            },
         }
     }
 }

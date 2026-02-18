@@ -1,9 +1,19 @@
-//! Universe generation: galaxies of star systems.
+//! Universe generation: galaxy of star systems.
+//!
+//! Simulates a disc galaxy: spiral arm structure, radial density falloff,
+//! and thin disc (height spread). Systems are placed in 3D for a realistic
+//! star map and warp distances.
 
 use crate::planet::Planet;
 use crate::star_system::{StarSystem, StarType, Star};
-use glam::DVec3;
+use glam::{DVec3, Vec3};
 use rand::prelude::*;
+
+/// Scale of the galaxy: inner radius (core edge) and outer radius in game units.
+const GALAXY_INNER_R: f64 = 150.0;
+const GALAXY_OUTER_R: f64 = 950.0;
+/// Disc scale height (half-thickness) in game units.
+const GALAXY_SCALE_HEIGHT: f64 = 45.0;
 
 /// Entry in the galaxy map -- lightweight until fully generated.
 #[derive(Debug, Clone)]
@@ -33,18 +43,19 @@ impl Universe {
                 let system_seed = seed.wrapping_add((i as u64 + 1) * 104729);
                 let star = Star::generate(system_seed);
 
-                // Place systems in a disc-like galaxy shape
+                // Radial distribution: more systems toward outer disc (exponential-like)
+                let u = rng.gen::<f64>();
+                let r = GALAXY_INNER_R + (GALAXY_OUTER_R - GALAXY_INNER_R) * u * u; // bias outward
                 let angle = rng.gen::<f64>() * std::f64::consts::TAU;
-                let arm_offset = (i % 4) as f64 * std::f64::consts::FRAC_PI_2;
+                // Spiral arm perturbation: angle offset depends on radius (winding)
+                let arm_phase = (r / 200.0) * std::f64::consts::FRAC_PI_2;
+                let arm_offset = (i % 4) as f64 * std::f64::consts::FRAC_PI_2 + arm_phase;
                 let spiral_angle = angle + arm_offset;
+                let spread = 35.0 + rng.gen::<f64>() * 45.0; // arm width
 
-                // Radial distance with spiral arm clustering
-                let r = 200.0 + rng.gen::<f64>() * 800.0;
-                let spread = 80.0 * rng.gen::<f64>();
-
-                let x = spiral_angle.cos() * r + rng.gen::<f64>() * spread - spread * 0.5;
-                let z = spiral_angle.sin() * r + rng.gen::<f64>() * spread - spread * 0.5;
-                let y = (rng.gen::<f64>() - 0.5) * 60.0; // thin disc
+                let x = spiral_angle.cos() * r + (rng.gen::<f64>() - 0.5) * spread;
+                let z = spiral_angle.sin() * r + (rng.gen::<f64>() - 0.5) * spread;
+                let y = (rng.gen::<f64>() - 0.5) * 2.0 * GALAXY_SCALE_HEIGHT; // thin disc
 
                 let position = DVec3::new(x, y, z);
 
@@ -74,6 +85,14 @@ impl Universe {
             system.name = entry.name.clone();
             if index == 0 {
                 system.name = "Sol System".to_string();
+                system.star = Star {
+                    star_type: StarType::YellowMain,
+                    color: Vec3::new(1.0, 0.97, 0.88),
+                    radius: 120.0,
+                    luminosity: 1.0,
+                    mass: 1.0,
+                    name: "Sol".to_string(),
+                };
                 if !system.bodies.is_empty() {
                     system.bodies[0].planet = Planet::earth();
                 }

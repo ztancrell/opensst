@@ -78,7 +78,7 @@ impl Default for TerrainConfig {
             seed: 0,
             offset_x: 0.0,
             offset_z: 0.0,
-            water_level: Some(0.25), // Default: water at ~25% of normalized height
+            water_level: Some(0.35), // Minecraft-style: sea level so valleys are below, peaks above
             water_coverage: 0.45,
             voxel_size: Some(1.0),   // Castle Miner Z style: 1m blocky terrain
         }
@@ -450,6 +450,9 @@ impl TerrainData {
         }
     }
 
+    /// Minecraft-style terrain: base fractal hills + ridged noise for cliffs/canyons.
+    /// Output is normalized so that sea level (~0.35) is in the middle: valleys go below (water),
+    /// peaks and cliffs go above. Range roughly -0.25..1.2 so water fills low areas.
     fn fractal_noise(
         perlin: &Perlin,
         simplex: &Simplex,
@@ -463,19 +466,29 @@ impl TerrainData {
         let mut max_value = 0.0;
 
         for _ in 0..config.octaves {
-            // Mix Perlin and Simplex for variety
             let perlin_sample = perlin.get([x * frequency, z * frequency]);
             let simplex_sample = simplex.get([x * frequency + 1000.0, z * frequency + 1000.0]);
-            
             value += (perlin_sample * 0.7 + simplex_sample * 0.3) * amplitude;
             max_value += amplitude;
-
             amplitude *= config.persistence;
             frequency *= config.lacunarity;
         }
 
-        // Normalize to 0-1 range
-        (value / max_value + 1.0) * 0.5
+        // Base terrain normalized to 0..1
+        let base = (value / max_value + 1.0) * 0.5;
+
+        // Ridged layer (1 - |noise|) for cliffs, mesas, canyon walls — higher frequency
+        let ridge_freq = config.frequency * 1.8;
+        let r1 = simplex.get([x * ridge_freq + 2000.0, z * ridge_freq + 2000.0]);
+        let r2 = simplex.get([x * ridge_freq * 2.0 + 3000.0, z * ridge_freq * 2.0 + 3000.0]);
+        let ridge = 1.0 - (r1 * r1 + r2 * r2).sqrt().min(1.0);
+        let ridge_contribution = ridge * 0.35; // 0..0.35
+
+        // Combined then remap so height range crosses sea level: valleys below, peaks above
+        let combined = (base + ridge_contribution).clamp(0.0, 1.0);
+        // Remap 0..1 -> ~-0.25..1.2 so ~35% of terrain is below sea level (water in valleys)
+        let normalized = (combined - 0.42) * 1.45 + 0.42;
+        normalized.clamp(-0.25, 1.25)
     }
 
     /// Check if a world position is within this chunk's bounds.
@@ -585,6 +598,92 @@ impl TerrainData {
                     };
                     self.heightmap[idx] = final_height;
                     self.vertices[idx].position[1] = final_height;
+                    modified = true;
+                }
+            }
+        }
+
+        if modified {
+            Self::calculate_normals(&mut self.vertices, res);
+        }
+        modified
+    }
+
+    /// Ace of Spades–style blocky dig: snap center to a voxel grid, remove one block level
+    /// in that cell. All modified heights are quantized to `block_size`. Returns true if any
+    /// vertices were modified.
+    pub fn deform_crater_blocky(
+        &mut self,
+        center_x: f32,
+        center_z: f32,
+        block_size: f32,
+    ) -> bool {
+        let snap_x = (center_x / block_size).floor() * block_size;
+        let snap_z = (center_z / block_size).floor() * block_size;
+        let half = block_size / 2.0;
+        let min_x = snap_x - half;
+        let max_x = snap_x + half;
+        let min_z = snap_z - half;
+        let max_z = snap_z + half;
+
+        let res = self.config.resolution as usize;
+        let step = self.config.size / (self.config.resolution - 1) as f32;
+        let half_size = self.config.size / 2.0;
+        let mut modified = false;
+
+        for z in 0..res {
+            for x in 0..res {
+                let idx = z * res + x;
+                let vx = x as f32 * step - half_size + self.config.offset_x;
+                let vz = z as f32 * step - half_size + self.config.offset_z;
+                if vx >= min_x && vx <= max_x && vz >= min_z && vz <= max_z {
+                    let current = self.heightmap[idx];
+                    let new_height = quantize_height(current, block_size) - block_size;
+                    let final_height = new_height.max(-500.0);
+                    self.heightmap[idx] = final_height;
+                    self.vertices[idx].position[1] = final_height;
+                    modified = true;
+                }
+            }
+        }
+
+        if modified {
+            Self::calculate_normals(&mut self.vertices, res);
+        }
+        modified
+    }
+
+    /// Blocky mound: raise one block level in the cell containing (center_x, center_z).
+    /// Quantizes to `block_size`. Used for Ace of Spades–style dirt pile from digging.
+    pub fn deform_mound_blocky(
+        &mut self,
+        center_x: f32,
+        center_z: f32,
+        block_size: f32,
+    ) -> bool {
+        let snap_x = (center_x / block_size).floor() * block_size;
+        let snap_z = (center_z / block_size).floor() * block_size;
+        let half = block_size / 2.0;
+        let min_x = snap_x - half;
+        let max_x = snap_x + half;
+        let min_z = snap_z - half;
+        let max_z = snap_z + half;
+
+        let res = self.config.resolution as usize;
+        let step = self.config.size / (self.config.resolution - 1) as f32;
+        let half_size = self.config.size / 2.0;
+        let mut modified = false;
+
+        for z in 0..res {
+            for x in 0..res {
+                let idx = z * res + x;
+                let vx = x as f32 * step - half_size + self.config.offset_x;
+                let vz = z as f32 * step - half_size + self.config.offset_z;
+                if vx >= min_x && vx <= max_x && vz >= min_z && vz <= max_z {
+                    let current = self.heightmap[idx];
+                    let new_height = quantize_height(current, block_size) + block_size;
+                    self.heightmap[idx] = new_height;
+                    self.vertices[idx].position[1] = new_height;
                     modified = true;
                 }
             }
