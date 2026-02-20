@@ -17,7 +17,7 @@ struct TerrainUniform {
     sun_direction: vec4<f32>,
     fog_params: vec4<f32>,            // x = density, y = height_falloff, z = start, w = end
     deform_params: vec4<f32>,         // x = origin_x, y = origin_z, z = half_size, w = enabled
-    snow_params: vec4<f32>,           // x = snow_enabled, yzw unused
+    snow_params: vec4<f32>,           // x = snow_enabled, y = voxel_flat_color (1 = use vertex color only)
 };
 
 @group(0) @binding(0)
@@ -789,9 +789,9 @@ fn chunk_edge_blend(world_pos: vec3<f32>, chunk_size: f32) -> f32 {
     let edge_dist_z = min(chunk_frac_z, 1.0 - chunk_frac_z);
     let edge_dist = min(edge_dist_x, edge_dist_z);
 
-    // Blend zone: ramp from 0 (at ~5% from edge) to 1 (at edge)
-    // This is ~3.2 world units for a 64-unit chunk
-    return 1.0 - smoothstep(0.0, 0.05, edge_dist);
+    // Blend zone: ramp from 0 (at ~18% from edge) to 1 (at edge) — wider zone hides chunk lines
+    // ~11.5 world units for a 64-unit chunk so seams are smoothly faded
+    return 1.0 - smoothstep(0.0, 0.18, edge_dist);
 }
 
 @fragment
@@ -800,9 +800,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let chunk_size = terrain.biome_params.x;
     let time = terrain.biome_params.z;
 
-    // World-space position for texturing (scaled for detail)
+    // World-space position for texturing (scaled for detail; detail_scale 2.0 = base, higher = finer)
     let world_p = in.world_position;
-    let p = world_p * 0.1;
+    let detail = terrain.biome_params.y / 2.0;
+    let p = world_p * 0.1 * detail;
 
     // ---- CHUNK EDGE BLEND FACTOR ----
     // Near chunk borders, blend toward a smoother, lower-frequency texture
@@ -825,6 +826,60 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let use_uniform = !has_vertex_color || is_earth_palette;
     let biome_tint = select(vertex_rgb, uniform_base, use_uniform);
 
+    // Voxel flat color: use block/biome vertex color as albedo (no procedural texture)
+    let voxel_flat = terrain.snow_params.y > 0.5;
+    if (voxel_flat) {
+        let albedo_flat = max(biome_tint, vec3<f32>(0.18, 0.18, 0.20));
+        let light_dir = normalize(terrain.sun_direction.xyz);
+        let sun_intensity = terrain.sun_direction.w;
+        let day_factor = clamp(light_dir.y * 3.0, 0.0, 1.0);
+        // Softer AO so voxel sides aren't near-black (was 0.5 min, now 0.7 min)
+        let ao = smoothstep(-0.2, 0.3, n.y) * 0.3 + 0.7;
+        let sky_ambient = vec3<f32>(0.28, 0.30, 0.36) * day_factor;
+        let ground_bounce = vec3<f32>(0.12, 0.10, 0.08) * day_factor;
+        let night_ambient = vec3<f32>(0.12, 0.10, 0.14);
+        let ambient_light = mix(night_ambient, mix(ground_bounce, sky_ambient, n.y * 0.5 + 0.5), day_factor) * ao;
+        let n_dot_l = max(dot(n, light_dir), 0.0);
+        let half_lambert = n_dot_l * 0.65 + 0.35;
+        let sun_contrib = vec3<f32>(1.0, 0.96, 0.88) * half_lambert * sun_intensity;
+        var color_flat = albedo_flat * (ambient_light + sun_contrib);
+        // Shadow: use same logic as main path to avoid checkerboard/shadow acne
+        let back_face_to_light = n_dot_l < 0.02;
+        var shadow_factor: f32 = 1.0;
+        if (!back_face_to_light) {
+            let light_clip = shadow.light_view_proj * vec4<f32>(world_p, 1.0);
+            let light_ndc = light_clip.xyz / light_clip.w;
+            let shadow_uv = light_ndc.xy * 0.5 + 0.5;
+            let slope_bias = (1.0 - abs(dot(n, light_dir))) * 0.018;
+            let depth_compare = light_ndc.z * 0.5 + 0.5 + 0.006 + slope_bias;
+            let in_bounds = all(shadow_uv >= vec2<f32>(0.0)) && all(shadow_uv <= vec2<f32>(1.0))
+                && light_ndc.z >= -0.02 && light_ndc.z <= 1.02;
+            let sampled = textureSampleCompare(shadow_tex, shadow_sampler, shadow_uv, depth_compare);
+            shadow_factor = select(1.0, sampled, in_bounds);
+            if (n_dot_l < 0.08) {
+                shadow_factor = mix(0.0, shadow_factor, smoothstep(0.02, 0.08, n_dot_l));
+            }
+        } else {
+            shadow_factor = 0.0;
+        }
+        color_flat *= shadow_factor;
+        // Floor so shadowed voxels stay visible (no pitch-black patches)
+        color_flat = max(color_flat, albedo_flat * vec3<f32>(0.14, 0.12, 0.16));
+        // Fog
+        let view_dir = normalize(camera.position.xyz - world_p);
+        let dist = length(camera.position.xyz - world_p);
+        let fog_start = terrain.fog_params.z;
+        let fog_end = terrain.fog_params.w;
+        let fog_amount = clamp((dist - fog_start) / max(fog_end - fog_start, 1.0), 0.0, 0.88);
+        let day_fog = mix(terrain.biome_colors[2].rgb * 0.7 + biome_tint * 0.15 + vec3<f32>(0.08, 0.06, 0.05), terrain.biome_colors[3].rgb * 0.5 + vec3<f32>(0.25, 0.24, 0.22), day_factor);
+        let night_fog = terrain.biome_colors[2].rgb * 0.08 + vec3<f32>(0.012, 0.014, 0.025);
+        let fog_color = mix(night_fog, day_fog, day_factor);
+        color_flat = mix(color_flat, fog_color, fog_amount);
+        color_flat = clamp(color_flat, vec3<f32>(0.0), vec3<f32>(1.0));
+        color_flat = pow(color_flat, vec3<f32>(1.0 / 2.2));
+        return vec4<f32>(color_flat, 1.0);
+    }
+
     // Classify biome from color heuristics (for procedural material selection)
     let warmth = biome_tint.r - biome_tint.b;
     let greenness = biome_tint.g - max(biome_tint.r, biome_tint.b);
@@ -840,7 +895,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var biome_id: i32;
     if (purple) {
         biome_id = 6; // crystalline (purple-blue hues)
-    } else if (is_grey && avg_brightness > 0.25 && avg_brightness < 0.45) {
+    } else if (is_grey && avg_brightness > 0.25 && avg_brightness < 0.45 && !is_earth_palette) {
+        // Ash only on non-Earth: on Earth, Mountain grey uses rock to avoid black/dark patches
         biome_id = 7; // ashlands (neutral grey)
     } else if (coldness > 0.1) {
         biome_id = 4; // frozen
@@ -898,6 +954,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tinted = albedo * biome_tint;
     albedo = mix(procedural_only, tinted, 0.75);
     albedo *= 1.15;
+    // Prevent near-black terrain (shadow + dark material): floor albedo so lighting never goes to black
+    albedo = max(albedo, vec3<f32>(0.2, 0.2, 0.22));
 
     // Erosion streaks on slopes (vertical dark lines from water erosion)
     // Also reduce at chunk edges
@@ -938,13 +996,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let smooth_lambert = mix(toon_lambert, half_lambert, 0.35);
     var diffuse = sun_color * smooth_lambert * sun_intensity;
 
-    // Shadow map: sample sun shadow (directional light)
-    let light_clip = shadow.light_view_proj * vec4<f32>(world_p, 1.0);
-    let light_ndc = light_clip.xyz / light_clip.w;
-    let shadow_uv = light_ndc.xy * 0.5 + 0.5;
-    let depth_compare = light_ndc.z * 0.5 + 0.5 + 0.002;
-    let in_bounds = all(shadow_uv >= vec2<f32>(0.0)) && all(shadow_uv <= vec2<f32>(1.0));
-    let shadow_factor = select(1.0, textureSampleCompare(shadow_tex, shadow_sampler, shadow_uv, depth_compare), in_bounds);
+    // Shadow map: sample sun shadow (directional light).
+    // When sun/moon is behind voxel terrain, back-facing fragments get unstable shadow lookup
+    // (depth near shadow map limit, grazing angles). Force shadow for back faces to avoid flicker.
+    let back_face_to_light = n_dot_l < 0.02;
+    var shadow_factor: f32 = 1.0;
+    if (!back_face_to_light) {
+        let light_clip = shadow.light_view_proj * vec4<f32>(world_p, 1.0);
+        let light_ndc = light_clip.xyz / light_clip.w;
+        let shadow_uv = light_ndc.xy * 0.5 + 0.5;
+        // Slope-scaled bias: voxel/steep faces need more bias to avoid checkered shadow acne (self-shadow)
+        let slope_bias = (1.0 - abs(dot(n, light_dir))) * 0.012;
+        let depth_compare = light_ndc.z * 0.5 + 0.5 + 0.005 + slope_bias;
+        let in_bounds = all(shadow_uv >= vec2<f32>(0.0)) && all(shadow_uv <= vec2<f32>(1.0))
+            && light_ndc.z >= -0.02 && light_ndc.z <= 1.02;
+        let sampled = textureSampleCompare(shadow_tex, shadow_sampler, shadow_uv, depth_compare);
+        shadow_factor = select(1.0, sampled, in_bounds);
+        // Smooth transition for grazing angles so no hard flicker at terminator
+        if (n_dot_l < 0.08) {
+            shadow_factor = mix(0.0, shadow_factor, smoothstep(0.02, 0.08, n_dot_l));
+        }
+    } else {
+        shadow_factor = 0.0;
+    }
     diffuse *= shadow_factor;
 
     // Specular: Blinn-Phong with roughness variation (slightly sharper for stylized look)

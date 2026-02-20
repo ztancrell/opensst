@@ -1,4 +1,8 @@
 //! Render pipeline management.
+//!
+//! **Winding convention:** All pipelines use `front_face: Ccw` and `cull_mode: Back`. Every mesh
+//! must be wound so that when the camera is *outside* the surface looking at a face, the triangle
+//! vertices appear counter-clockwise in screen space. (CCW from outside = front face = not culled.)
 
 use crate::{Texture, Vertex, InstanceData, CelestialBodyInstance};
 
@@ -250,7 +254,7 @@ pub fn create_terrain_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            cull_mode: None, // Double-sided: no see-through when under map or inside caves
             polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
             conservative: false,
@@ -319,7 +323,7 @@ pub fn create_water_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: Texture::DEPTH_FORMAT,
-            depth_write_enabled: true,
+            depth_write_enabled: false, // transparent: read depth only so water doesn't occlude behind
             depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -581,7 +585,8 @@ pub fn create_celestial_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: Texture::DEPTH_FORMAT,
             depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
+            // LessEqual so sun/moon at far plane (same depth as sky quad) still pass and draw on top of sky
+            depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

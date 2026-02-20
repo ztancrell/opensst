@@ -234,6 +234,9 @@ impl TerrainData {
             }
         }
 
+        // Smooth normals (average with 4-neighbors) for less jagged, softer shading
+        Self::smooth_normals_grid(&mut vertices, res);
+
         // Generate indices for the inner grid
         let mut indices = Vec::with_capacity((res - 1) * (res - 1) * 6);
         for z in 0..(res - 1) {
@@ -491,6 +494,14 @@ impl TerrainData {
         normalized.clamp(-0.25, 1.25)
     }
 
+    /// Sample normalized terrain height at world (x, z) for voxel generation.
+    /// Returns value in [-0.25, 1.25] (same as fractal_noise; sea level ~0.35).
+    pub fn sample_height_for_voxel(config: &TerrainConfig, x: f64, z: f64) -> f64 {
+        let perlin = Perlin::new(deterministic_noise_seed(config.seed, 0));
+        let simplex = Simplex::new(deterministic_noise_seed(config.seed, 1));
+        Self::fractal_noise(&perlin, &simplex, x, z, config)
+    }
+
     /// Check if a world position is within this chunk's bounds.
     pub fn contains(&self, x: f32, z: f32) -> bool {
         let half = self.config.size / 2.0;
@@ -734,6 +745,37 @@ impl TerrainData {
         // Normalize accumulated normals
         for (i, vertex) in vertices.iter_mut().enumerate() {
             let n = normals[i].normalize();
+            vertex.normal = [n.x, n.y, n.z];
+        }
+    }
+
+    /// Smooth vertex normals by averaging with 4-neighbors for softer, less jagged shading.
+    fn smooth_normals_grid(vertices: &mut [TerrainVertex], resolution: usize) {
+        let mut smoothed: Vec<Vec3> = vec![Vec3::ZERO; vertices.len()];
+        for z in 0..resolution {
+            for x in 0..resolution {
+                let i = z * resolution + x;
+                let n: Vec3 = vertices[i].normal.into();
+                let mut sum = n;
+                if x > 0 {
+                    sum += Vec3::from(vertices[i - 1].normal);
+                }
+                if x + 1 < resolution {
+                    sum += Vec3::from(vertices[i + 1].normal);
+                }
+                if z > 0 {
+                    sum += Vec3::from(vertices[i - resolution].normal);
+                }
+                if z + 1 < resolution {
+                    sum += Vec3::from(vertices[i + resolution].normal);
+                }
+                if let Some(nn) = sum.try_normalize() {
+                    smoothed[i] = nn;
+                }
+            }
+        }
+        for (i, vertex) in vertices.iter_mut().enumerate() {
+            let n = smoothed[i];
             vertex.normal = [n.x, n.y, n.z];
         }
     }

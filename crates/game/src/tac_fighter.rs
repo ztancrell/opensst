@@ -1,5 +1,8 @@
-//! Tac Fighter close air support: bombing runs and ordnance delivery.
-//! Attack patterns and danger-close avoidance for cinematic CAS.
+//! TAC Fighter (Tactical Airspace Control) close air support.
+//!
+//! UCF Fleet starfighter/bomber: bombing runs, napalm, and ordnance delivery.
+//! Twin-engine design; primarily used as bomber; has forward-facing guns for air combat.
+//! Styled after the franchise TAC Fighter (e.g. Starship Troopers film, Extermination).
 
 use glam::Vec3;
 use rand::Rng;

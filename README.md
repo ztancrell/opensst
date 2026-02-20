@@ -87,6 +87,8 @@ Open Starship Troopers — a fast, realistic Starship Troopers-inspired first-pe
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test, and submit changes.
 
+**Audio:** The `audio` crate (Kira, spatial) exists but is not yet wired into the game. See `docs/IMPROVEMENTS.md` for wiring or removal.
+
 ## Building
 
 ```bash

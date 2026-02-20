@@ -1,4 +1,7 @@
 //! Mesh data structures and primitive generation.
+//!
+//! All meshes must use **CCW winding when viewed from outside** (see `pipeline.rs`). The pipeline
+//! uses `front_face: Ccw` and culls back faces, so incorrect winding causes faces to disappear.
 
 use crate::vertex::Vertex;
 use glam::Vec3;
@@ -73,14 +76,16 @@ impl Mesh {
             Vertex::new([-0.5, 0.5, -0.5], [-1.0, 0.0, 0.0], [0.0, 0.0]),
         ];
 
+        // CCW winding when viewed from outside (pipeline culls back face). Every face must be
+        // wound so that when the camera is outside the cube looking at that face, vertices are CCW.
         #[rustfmt::skip]
         let indices: [u32; 36] = [
-            0, 1, 2, 2, 3, 0,       // Front
-            4, 5, 6, 6, 7, 4,       // Back
-            8, 9, 10, 10, 11, 8,   // Top
-            12, 13, 14, 14, 15, 12, // Bottom
-            16, 17, 18, 18, 19, 16, // Right
-            20, 21, 22, 22, 23, 20, // Left
+            0, 3, 2, 0, 2, 1,       // Front +Z
+            4, 5, 6, 4, 6, 7,       // Back -Z (was CW; fixed to CCW from outside)
+            8, 11, 10, 8, 10, 9,    // Top +Y
+            12, 15, 14, 12, 14, 13, // Bottom -Y
+            16, 19, 18, 16, 18, 17, // Right +X
+            20, 23, 22, 20, 22, 21, // Left -X
         ];
 
         Self::new(device, &vertices, &indices)
@@ -226,18 +231,19 @@ impl Mesh {
             }
         }
 
+        // CCW winding when viewed from outside (pipeline culls back face)
         for ring in 0..rings {
             for segment in 0..segments {
                 let current = ring * (segments + 1) + segment;
                 let next = current + segments + 1;
 
                 indices.push(current);
-                indices.push(next);
                 indices.push(current + 1);
+                indices.push(next);
 
                 indices.push(current + 1);
-                indices.push(next);
                 indices.push(next + 1);
+                indices.push(next);
             }
         }
 

@@ -398,17 +398,18 @@ pub fn build_rock() -> (Vec<Vertex>, Vec<u32>) {
         }
     }
 
+    // CCW winding when viewed from outside (pipeline culls back face)
     for r in 0..ring {
         let curr = start_idx + (r * (seg + 1)) as u32;
         let next = curr + (seg + 1) as u32;
         for s in 0..=seg as u32 {
             let ns = if s < seg as u32 { s + 1 } else { 0 };
             i.push(curr + s);
-            i.push(next + s);
-            i.push(curr + ns);
             i.push(curr + ns);
             i.push(next + s);
+            i.push(curr + ns);
             i.push(next + ns);
+            i.push(next + s);
         }
     }
 
@@ -460,21 +461,22 @@ pub fn build_rock_chunk() -> (Vec<Vertex>, Vec<u32>) {
     for s in 0..=seg_u {
         let next_s = (s + 1) % (seg_u + 1);
         i.push(cap_idx);
-        i.push(last_ring_base + next_s);
         i.push(last_ring_base + s);
+        i.push(last_ring_base + next_s);
     }
 
+    // CCW winding when viewed from outside
     for r in 0..ring - 1 {
         let curr = start_idx + (r * (seg + 1)) as u32;
         let next = curr + (seg + 1) as u32;
         for s in 0..=seg as u32 {
             let ns = if s < seg as u32 { s + 1 } else { 0 };
             i.push(curr + s);
-            i.push(next + s);
-            i.push(curr + ns);
             i.push(curr + ns);
             i.push(next + s);
+            i.push(curr + ns);
             i.push(next + ns);
+            i.push(next + s);
         }
     }
 
@@ -518,17 +520,18 @@ pub fn build_rock_boulder() -> (Vec<Vertex>, Vec<u32>) {
         }
     }
 
+    // CCW winding when viewed from outside
     for r in 0..ring {
         let curr = start_idx + (r * (seg + 1)) as u32;
         let next = curr + (seg + 1) as u32;
         for s in 0..=seg as u32 {
             let ns = if s < seg as u32 { s + 1 } else { 0 };
             i.push(curr + s);
-            i.push(next + s);
-            i.push(curr + ns);
             i.push(curr + ns);
             i.push(next + s);
+            i.push(curr + ns);
             i.push(next + ns);
+            i.push(next + s);
         }
     }
 

@@ -50,6 +50,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 0.0, 0.0, 0.0, 0.0, 0.0,  // no clouds/dust/planet, atmo_height=0 = space
                 [0.02, 0.025, 0.04],      // surface (unused in menu)
                 [0.02, 0.025, 0.04],      // atmosphere (dark space)
+                false,                    // menu: no physical sun/moon
             );
             state.renderer.render_sky(
                 &mut encoder,
@@ -371,9 +372,11 @@ pub fn run(state: &mut GameState) -> Result<()> {
         let approach_in_space = state.phase == GamePhase::ApproachPlanet && state.approach_flight_state.is_some();
         let in_ship_interior = state.phase == GamePhase::InShip;
         let in_space_view = state.phase == GamePhase::MainMenu || extraction_orbit || approach_in_space || in_ship_interior;
-        if in_space_view {
-            state.renderer.update_camera(&state.camera, 0.0);
-        }
+        // Always update camera so sky + celestial use current view (critical when on planet for physical sun/moon)
+        state.renderer.update_camera(
+            &state.camera,
+            if in_space_view { 0.0 } else { state.planet_radius_for_curvature() },
+        );
         // When in orbit: atmo_height=0 (no sky atmosphere), but pass cloud_density so the
         // planet sphere shows realtime weather (cloud coverage visible from orbit).
         // During drop sequence: use much larger effective atmo_height so atmosphere (clouds,
@@ -405,6 +408,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
             sky_atmo_height,
             planet_surface_color,
             atmosphere_color,
+            !in_space_view && state.current_planet_idx.is_some(), // physical sun/moon when on planet surface
         );
         state.renderer.render_sky(
             &mut encoder,
@@ -420,8 +424,8 @@ pub fn run(state: &mut GameState) -> Result<()> {
         let celestial_instances = state.build_celestial_instances();
         state.renderer.render_celestial(&mut encoder, &scene_view, &celestial_instances);
 
-        // Pass 0b0: Federation fleet visible from planet surface — Starship Troopers style
-        // Multi-part ships: hull + bridge/superstructure + engine glow; military grey/blue-grey, bright engines
+        // Pass 0b0: Federation fleet from planet surface — Corvette Transport (Rodger Young type)
+        // Ref: https://starshiptroopers.fandom.com/wiki/Rodger_Young_Type — long hull, dorsal bridge, twin engine pods
         if (!in_space_view || extraction_orbit) && state.current_planet_idx.is_some() && state.phase == GamePhase::Playing {
             let ot = state.orbital_time as f32;
             let t = state.time.elapsed_seconds();
@@ -433,46 +437,58 @@ pub fn run(state: &mut GameState) -> Result<()> {
             );
             let mut fleet_hull: Vec<InstanceData> = Vec::new();
             let mut fleet_glow: Vec<InstanceData> = Vec::new();
-            // UCF/MI colors: gunmetal hull, darker trim, bright blue engine
-            let hull_corvette = [0.18, 0.20, 0.26, 1.0];   // Corvette: slate blue-grey
-            let hull_destroyer = [0.12, 0.14, 0.19, 1.0];  // Destroyer: darker capital ship
-            let bridge_color = [0.22, 0.24, 0.30, 1.0];   // Command section slightly lighter
-            let engine_corvette = [0.25, 0.50, 0.85, 0.75];
-            let engine_destroyer = [0.28, 0.55, 0.92, 0.8];
+            let hull_corvette = [0.18, 0.20, 0.26, 1.0];
+            let hull_destroyer = [0.12, 0.14, 0.19, 1.0];
+            let bridge_color = [0.22, 0.24, 0.30, 1.0];
+            let engine_pod_color = [0.14, 0.16, 0.20, 1.0];
+            let engine_corvette = [0.26, 0.52, 0.88, 0.75];
+            let engine_destroyer = [0.28, 0.56, 0.94, 0.8];
 
-            // Corvettes: angular hull + bridge block + engine (Starship Troopers patrol craft)
+            // Corvette Transports: long hull + dorsal bridge + twin engine pods (Rodger Young type)
             for (i, &(radius, phase, speed)) in SURFACE_CORVETTE_PARAMS.iter().enumerate() {
                 let angle = phase + ot * speed + t * 0.015;
                 let pos = corvette_positions[i];
                 let facing = Vec3::new(-angle.sin(), 0.0, angle.cos());
+                let right = Vec3::new(-facing.z, 0.0, facing.x);
                 let rot = Quat::from_rotation_arc(Vec3::Z, facing);
                 let scale_len = 35.0 + (i as f32 * 0.08).sin() * 5.0;
                 let half_len = scale_len * 0.5;
-                // Main hull (elongated, flat)
+                // Main hull (elongated, whale-like silhouette)
                 let m_hull = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(2.8, 1.0, scale_len),
+                    Vec3::new(2.6, 1.0, scale_len),
                     rot,
                     pos,
                 );
                 fleet_hull.push(InstanceData::new(m_hull.to_cols_array_2d(), hull_corvette));
-                // Bridge/superstructure (small block on top, offset forward)
-                let bridge_pos = pos + facing * half_len * 0.25 + Vec3::new(0.0, 1.4, 0.0);
+                // Bridge (dorsal, forward of amidships)
+                let bridge_pos = pos + facing * half_len * 0.28 + Vec3::new(0.0, 1.35, 0.0);
                 let m_bridge = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(1.4, 0.6, 2.5),
+                    Vec3::new(1.3, 0.6, 2.2),
                     rot,
                     bridge_pos,
                 );
                 fleet_hull.push(InstanceData::new(m_bridge.to_cols_array_2d(), bridge_color));
-                // Engine glow
-                let stern = pos - facing * half_len * 1.1;
-                let g = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(1.4, 0.7, 1.4),
-                    Quat::IDENTITY,
-                    stern,
-                );
-                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_corvette));
+                // Twin engine pods (stern, left and right)
+                let stern_center = pos - facing * half_len * 1.05;
+                let pod_offset = 1.0;
+                for side in [-1.0f32, 1.0] {
+                    let pod_pos = stern_center + right * (side * pod_offset) - Vec3::Y * 0.15;
+                    let m_pod = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.5, 0.5, 1.4),
+                        rot,
+                        pod_pos,
+                    );
+                    fleet_hull.push(InstanceData::new(m_pod.to_cols_array_2d(), engine_pod_color));
+                    let glow_pos = pod_pos - facing * 1.0;
+                    let g = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.7, 0.4, 0.8),
+                        Quat::IDENTITY,
+                        glow_pos,
+                    );
+                    fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_corvette));
+                }
             }
-            // Destroyers: capital-ship silhouette — hull + tall command tower + dual engine glow
+            // Destroyers (Corvette Transport class, larger): long hull + command tower + twin engine pods
             let d_angle = ot * 0.07 + t * 0.008;
             let d_radius = 220.0;
             for (i, &(phase_off, y_off)) in [
@@ -487,39 +503,58 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     cam_pos.z + a.sin() * d_radius,
                 );
                 let facing = Vec3::new(-a.sin(), 0.0, a.cos());
+                let right = Vec3::new(-facing.z, 0.0, facing.x);
                 let rot = Quat::from_rotation_arc(Vec3::Z, facing);
                 let scale_len = 70.0 + (i as f32 * 0.1).sin() * 5.0;
                 let half_len = scale_len * 0.5;
-                // Main hull (long, low)
+                // Main hull (long, heavy — whale-like capital ship)
                 let m_hull = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(4.2, 1.6, scale_len),
+                    Vec3::new(4.0, 1.6, scale_len),
                     rot,
                     pos,
                 );
                 fleet_hull.push(InstanceData::new(m_hull.to_cols_array_2d(), hull_destroyer));
-                // Command tower (tall block amidships — Roger Young style)
-                let tower_pos = pos + facing * half_len * 0.1 + Vec3::new(0.0, 2.8, 0.0);
+                // Amidships hangar bulge (suggests launch bays)
+                let hangar_pos = pos + facing * half_len * 0.05 + Vec3::new(0.0, 0.3, 0.0);
+                let m_hangar = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(4.6, 0.6, scale_len * 0.35),
+                    rot,
+                    hangar_pos,
+                );
+                fleet_hull.push(InstanceData::new(m_hangar.to_cols_array_2d(), [0.14, 0.16, 0.21, 1.0]));
+                // Command tower (tall, amidships — Roger Young bridge)
+                let tower_pos = pos + facing * half_len * 0.12 + Vec3::new(0.0, 2.6, 0.0);
                 let m_tower = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(2.2, 2.2, 2.8),
+                    Vec3::new(2.0, 2.0, 2.6),
                     rot,
                     tower_pos,
                 );
                 fleet_hull.push(InstanceData::new(m_tower.to_cols_array_2d(), bridge_color));
-                // Stern engine glow (larger, brighter)
-                let stern = pos - facing * half_len * 1.0;
-                let g = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(2.8, 1.4, 2.4),
-                    Quat::IDENTITY,
-                    stern,
-                );
-                fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_destroyer));
+                // Twin engine pods (stern)
+                let stern_center = pos - facing * half_len * 0.98;
+                let pod_offset = 2.2;
+                for side in [-1.0f32, 1.0] {
+                    let pod_pos = stern_center + right * (side * pod_offset) - Vec3::Y * 0.2;
+                    let m_pod = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(1.0, 1.0, 2.8),
+                        rot,
+                        pod_pos,
+                    );
+                    fleet_hull.push(InstanceData::new(m_pod.to_cols_array_2d(), engine_pod_color));
+                    let glow_pos = pod_pos - facing * 1.8;
+                    let g = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(1.2, 0.7, 1.4),
+                        Quat::IDENTITY,
+                        glow_pos,
+                    );
+                    fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_destroyer));
+                }
             }
-            // Earth atmosphere: bustling spaceport — extra MI corvettes, destroyers, dropships (Starship Troopers style)
+            // Earth orbit: extra Corvette Transports and dropships (bustling spaceport)
             let is_earth = state.planet.name == "Earth";
             if is_earth {
-                let hull_earth = [0.16, 0.18, 0.24, 1.0];  // Slightly lighter for Earth fleet
+                let hull_earth = [0.16, 0.18, 0.24, 1.0];
                 let engine_earth = [0.26, 0.52, 0.88, 0.7];
-                // Extra corvettes (multi-part: hull + bridge + engine)
                 for (i, &(radius, phase, speed, y_off)) in [
                     (115.0f32, 0.4, 0.17, 60.0),
                     (145.0, 2.5, 0.13, -45.0),
@@ -537,6 +572,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                         cam_pos.z + angle.sin() * radius,
                     );
                     let facing = Vec3::new(-angle.sin(), 0.0, angle.cos());
+                    let right = Vec3::new(-facing.z, 0.0, facing.x);
                     let rot = Quat::from_rotation_arc(Vec3::Z, facing);
                     let scale_len = 32.0 + (i as f32 * 0.12).sin() * 4.0;
                     let half_len = scale_len * 0.5;
@@ -546,22 +582,30 @@ pub fn run(state: &mut GameState) -> Result<()> {
                         pos,
                     );
                     fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), hull_earth));
-                    let bridge_pos = pos + facing * half_len * 0.2 + Vec3::new(0.0, 1.2, 0.0);
+                    let bridge_pos = pos + facing * half_len * 0.22 + Vec3::new(0.0, 1.15, 0.0);
                     let m_bridge = glam::Mat4::from_scale_rotation_translation(
-                        Vec3::new(1.2, 0.5, 2.0),
+                        Vec3::new(1.1, 0.5, 1.8),
                         rot,
                         bridge_pos,
                     );
                     fleet_hull.push(InstanceData::new(m_bridge.to_cols_array_2d(), bridge_color));
-                    let stern = pos - facing * half_len * 1.1;
-                    let g = glam::Mat4::from_scale_rotation_translation(
-                        Vec3::new(1.1, 0.6, 1.2),
-                        Quat::IDENTITY,
-                        stern,
-                    );
-                    fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_earth));
+                    let stern_center = pos - facing * half_len * 1.08;
+                    for side in [-1.0f32, 1.0] {
+                        let pod_pos = stern_center + right * (side * 0.85) - Vec3::Y * 0.1;
+                        let m_pod = glam::Mat4::from_scale_rotation_translation(
+                            Vec3::new(0.4, 0.4, 1.1),
+                            rot,
+                            pod_pos,
+                        );
+                        fleet_hull.push(InstanceData::new(m_pod.to_cols_array_2d(), engine_pod_color));
+                        let g = glam::Mat4::from_scale_rotation_translation(
+                            Vec3::new(0.55, 0.35, 0.6),
+                            Quat::IDENTITY,
+                            pod_pos - facing * 0.8,
+                        );
+                        fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_earth));
+                    }
                 }
-                // Extra destroyers (hull + tower + engine)
                 for (i, &(phase_off, rad_off, y_off)) in [
                     (0.5f32, 200.0, 140.0),
                     (std::f32::consts::PI * 0.4, 240.0, -80.0),
@@ -575,6 +619,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                         cam_pos.z + a.sin() * rad_off,
                     );
                     let facing = Vec3::new(-a.sin(), 0.0, a.cos());
+                    let right = Vec3::new(-facing.z, 0.0, facing.x);
                     let rot = Quat::from_rotation_arc(Vec3::Z, facing);
                     let scale_len = 65.0 + (i as f32 * 0.08).sin() * 6.0;
                     let half_len = scale_len * 0.5;
@@ -584,20 +629,36 @@ pub fn run(state: &mut GameState) -> Result<()> {
                         pos,
                     );
                     fleet_hull.push(InstanceData::new(m.to_cols_array_2d(), hull_destroyer));
-                    let tower_pos = pos + facing * half_len * 0.05 + Vec3::new(0.0, 2.4, 0.0);
+                    let hangar_pos = pos + facing * half_len * 0.06 + Vec3::new(0.0, 0.25, 0.0);
+                    let m_hangar = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(4.2, 0.5, scale_len * 0.32),
+                        rot,
+                        hangar_pos,
+                    );
+                    fleet_hull.push(InstanceData::new(m_hangar.to_cols_array_2d(), [0.14, 0.16, 0.21, 1.0]));
+                    let tower_pos = pos + facing * half_len * 0.08 + Vec3::new(0.0, 2.3, 0.0);
                     let m_tower = glam::Mat4::from_scale_rotation_translation(
-                        Vec3::new(1.8, 1.9, 2.4),
+                        Vec3::new(1.7, 1.8, 2.2),
                         rot,
                         tower_pos,
                     );
                     fleet_hull.push(InstanceData::new(m_tower.to_cols_array_2d(), bridge_color));
-                    let stern = pos - facing * half_len * 1.0;
-                    let g = glam::Mat4::from_scale_rotation_translation(
-                        Vec3::new(2.4, 1.2, 2.0),
-                        Quat::IDENTITY,
-                        stern,
-                    );
-                    fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_destroyer));
+                    let stern_center = pos - facing * half_len * 0.96;
+                    for side in [-1.0f32, 1.0] {
+                        let pod_pos = stern_center + right * (side * 2.0) - Vec3::Y * 0.15;
+                        let m_pod = glam::Mat4::from_scale_rotation_translation(
+                            Vec3::new(0.9, 0.9, 2.4),
+                            rot,
+                            pod_pos,
+                        );
+                        fleet_hull.push(InstanceData::new(m_pod.to_cols_array_2d(), engine_pod_color));
+                        let g = glam::Mat4::from_scale_rotation_translation(
+                            Vec3::new(1.0, 0.6, 1.2),
+                            Quat::IDENTITY,
+                            pod_pos - facing * 1.5,
+                        );
+                        fleet_glow.push(InstanceData::new(g.to_cols_array_2d(), engine_destroyer));
+                    }
                 }
                 // Dropships (compact hull + engine — troop carriers)
                 for (i, &(radius, phase, speed, y_off)) in [
@@ -780,7 +841,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 0b2: Federation destroyers (ship interior; warp) — Starship Troopers capital ships
+        // Pass 0b2: Federation destroyers (Corvette Transport / Rodger Young type) — ship interior / warp view
         let warp_active = state.warp_sequence.is_some();
         let ship_interior_visible = warp_active
             || ((state.phase == GamePhase::InShip || state.phase == GamePhase::ApproachPlanet)
@@ -791,8 +852,9 @@ pub fn run(state: &mut GameState) -> Result<()> {
             let fleet_scale = if in_ship_interior { 2.4 } else { 1.0 };
             let mut destroyer_hull: Vec<InstanceData> = Vec::new();
             let mut destroyer_glow: Vec<InstanceData> = Vec::new();
-            let hull_d = [0.11, 0.13, 0.18, 1.0];  // Dark gunmetal
-            let tower_d = [0.18, 0.20, 0.26, 1.0];  // Command tower
+            let hull_d = [0.11, 0.13, 0.18, 1.0];
+            let tower_d = [0.18, 0.20, 0.26, 1.0];
+            let engine_pod_d = [0.10, 0.12, 0.16, 1.0];
             let engine_d = [0.26, 0.52, 0.88, 0.65];
 
             let destroyer_specs: [(f32, f32, f32, f32); 6] = [
@@ -810,14 +872,13 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 let rot_y = timer * 0.03 + i as f32 * 0.15;
                 let rot = Quat::from_rotation_y(rot_y);
                 let fwd = rot * -Vec3::Z;
-                // Main hull (elongated cube)
+                let right = rot * Vec3::X;
                 let matrix = glam::Mat4::from_scale_rotation_translation(
                     Vec3::new(1.35 * fleet_scale, 0.5 * fleet_scale, len),
                     rot,
                     pos,
                 );
                 destroyer_hull.push(InstanceData::new(matrix.to_cols_array_2d(), hull_d));
-                // Command tower (block on top, amidships)
                 let tower_pos = pos + Vec3::new(0.0, 1.8 * fleet_scale, 0.0) + fwd * len * 0.08;
                 let tower_mat = glam::Mat4::from_scale_rotation_translation(
                     Vec3::new(0.9 * fleet_scale, 1.0 * fleet_scale, 1.2 * fleet_scale),
@@ -826,12 +887,22 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 );
                 destroyer_hull.push(InstanceData::new(tower_mat.to_cols_array_2d(), tower_d));
                 let stern = pos - Vec3::new(0.0, 0.0, len * 0.52);
-                let glow_mat = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(1.0 * fleet_scale, 0.5 * fleet_scale, 2.0 * fleet_scale),
-                    Quat::IDENTITY,
-                    stern,
-                );
-                destroyer_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), engine_d));
+                for side in [-1.0f32, 1.0] {
+                    let pod_pos = stern + right * (side * 1.2 * fleet_scale) - Vec3::new(0.0, 0.15 * fleet_scale, 0.0);
+                    let pod_mat = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.35 * fleet_scale, 0.35 * fleet_scale, 1.0 * fleet_scale),
+                        rot,
+                        pod_pos,
+                    );
+                    destroyer_hull.push(InstanceData::new(pod_mat.to_cols_array_2d(), engine_pod_d));
+                    let glow_pos = pod_pos - Vec3::new(0.0, 0.0, 1.2 * fleet_scale);
+                    let glow_mat = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.5 * fleet_scale, 0.3 * fleet_scale, 1.0 * fleet_scale),
+                        Quat::IDENTITY,
+                        glow_pos,
+                    );
+                    destroyer_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), engine_d));
+                }
             }
             if !destroyer_hull.is_empty() {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.cube, &destroyer_hull);
@@ -840,11 +911,12 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.flash_mesh, &destroyer_glow);
             }
 
-            // Pass 0b3: Federation corvettes — angular hull + bridge + engine (Starship Troopers patrol)
+            // Pass 0b3: Federation corvettes (Corvette Transport type) — hull + bridge + twin engine pods
             let mut corvette_hull: Vec<InstanceData> = Vec::new();
             let mut corvette_glow: Vec<InstanceData> = Vec::new();
             let corvette_hull_c = [0.16, 0.18, 0.24, 1.0];
             let corvette_bridge_c = [0.20, 0.22, 0.28, 1.0];
+            let corvette_pod_c = [0.12, 0.14, 0.18, 1.0];
             let corvette_engine_c = [0.24, 0.48, 0.82, 0.6];
             for (i, &(radius, phase, speed)) in [
                 (120.0f32, 0.0, 0.18),
@@ -865,6 +937,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     angle.sin() * radius,
                 );
                 let facing = Vec3::new(-angle.sin(), 0.0, angle.cos());
+                let right = Vec3::new(-facing.z, 0.0, facing.x);
                 let rot = Quat::from_rotation_arc(Vec3::Z, facing);
                 let matrix = glam::Mat4::from_scale_rotation_translation(
                     Vec3::new(0.5 * fleet_scale, 0.25 * fleet_scale, scale_len),
@@ -879,13 +952,23 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     bridge_pos,
                 );
                 corvette_hull.push(InstanceData::new(bridge_mat.to_cols_array_2d(), corvette_bridge_c));
-                let stern = pos - facing * scale_len * 0.5;
-                let glow_mat = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.38 * fleet_scale, 0.22 * fleet_scale, 1.0 * fleet_scale),
-                    Quat::IDENTITY,
-                    stern,
-                );
-                corvette_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), corvette_engine_c));
+                let stern_center = pos - facing * scale_len * 0.5;
+                for side in [-1.0f32, 1.0] {
+                    let pod_pos = stern_center + right * (side * 0.5 * fleet_scale);
+                    let pod_mat = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.2 * fleet_scale, 0.2 * fleet_scale, 0.6 * fleet_scale),
+                        rot,
+                        pod_pos,
+                    );
+                    corvette_hull.push(InstanceData::new(pod_mat.to_cols_array_2d(), corvette_pod_c));
+                    let glow_pos = pod_pos - facing * 0.6 * fleet_scale;
+                    let glow_mat = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.28 * fleet_scale, 0.18 * fleet_scale, 0.5 * fleet_scale),
+                        Quat::IDENTITY,
+                        glow_pos,
+                    );
+                    corvette_glow.push(InstanceData::new(glow_mat.to_cols_array_2d(), corvette_engine_c));
+                }
             }
             if !corvette_hull.is_empty() {
                 state.renderer.render_instanced_load(&mut encoder, &scene_view, &state.environment_meshes.cube, &corvette_hull);
@@ -1073,7 +1156,8 @@ pub fn run(state: &mut GameState) -> Result<()> {
                     | BiomeType::Tundra | BiomeType::SaltFlat
             );
             let snow_weather = state.weather.current == WeatherState::Snow;
-            let deform_enabled = tracks_biome || snow_weather;
+            // Voxel terrain: disable deform/snow texture pass to avoid full-screen artifact (deform is for heightfield footprints).
+            let deform_enabled = false; // was: tracks_biome || snow_weather;
             const SNOW_ACCUM_RATE: f32 = 0.08;   // m/s when snowing (knee-deep ~0.45 m in a few seconds)
             const SNOW_MELT_RATE: f32 = 0.04;   // m/s when clear/rain
             const SNOW_MAX_DEPTH: f32 = 0.45;   // knee-deep
@@ -1147,6 +1231,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 (0.0, 0.0)
             };
             let snow_enabled = deform_enabled;
+            let terrain_detail_scale = if state.planet.name == "Earth" { 2.7 } else { 2.0 };
             state.renderer.update_terrain(
                 state.time.elapsed_seconds(),
                 [sun_dir.x, sun_dir.y, sun_dir.z, terrain_sun_intensity],
@@ -1154,6 +1239,7 @@ pub fn run(state: &mut GameState) -> Result<()> {
                 biome_colors,
                 planet_radius,
                 state.chunk_manager.chunk_size,
+                terrain_detail_scale,
                 deform_origin_x,
                 deform_origin_z,
                 deform_enabled,
@@ -2099,44 +2185,89 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 5f: Tac Fighter fleet (angular fuselage shape — cube reads as fighter, not lumpy rock)
+        // Pass 5f: TAC Fighter fleet — UCF Tactical Airspace Control fighter bomber (twin-engine, angular)
+        // Ref: https://starshiptroopers.fandom.com/wiki/TAC_Fighter_(UCF)
         for fighter in &state.tac_fighters {
             let dist_sq = fighter.position.distance_squared(cam_pos);
             if dist_sq < 500.0 * 500.0 {
                 let fwd = fighter.velocity.normalize_or_zero();
-                let scale = Vec3::new(2.5, 0.6, 5.0); // Sleek fuselage: long, narrow, flat
+                // Horizontal "right" for wing/nacelle offset (perpendicular to velocity, stays level)
+                let right = {
+                    let r = Vec3::new(-fwd.z, 0.0, fwd.x);
+                    if r.length_squared() > 0.01 { r.normalize_or_zero() } else { Vec3::X }
+                };
                 let rotation = if fwd.length_squared() > 0.01 {
                     Quat::from_rotation_arc(Vec3::Z, fwd)
                 } else {
                     Quat::IDENTITY
                 };
-                let matrix = glam::Mat4::from_scale_rotation_translation(
-                    scale,
+                let grey = [0.18, 0.20, 0.24, 1.0]; // UCF military grey
+                let dark_grey = [0.14, 0.16, 0.19, 1.0]; // Nacelles slightly darker
+
+                // Central fuselage — long, narrow, flat (fighter-bomber silhouette)
+                let fuselage_scale = Vec3::new(2.6, 0.65, 5.2);
+                let fuselage_matrix = glam::Mat4::from_scale_rotation_translation(
+                    fuselage_scale,
                     rotation,
                     fighter.position,
                 );
-                let color = [0.18, 0.20, 0.24, 1.0]; // Dark military grey
-                let instances = vec![InstanceData::new(matrix.to_cols_array_2d(), color)];
                 state.renderer.render_instanced_load(
                     &mut encoder,
                     &scene_view,
                     &state.environment_meshes.cube,
-                    &instances,
+                    &[InstanceData::new(fuselage_matrix.to_cols_array_2d(), grey)],
                 );
-                let exhaust_pos = fighter.position - fwd * 4.0;
-                let exhaust_matrix = glam::Mat4::from_scale_rotation_translation(
-                    Vec3::splat(1.2),
-                    Quat::IDENTITY,
-                    exhaust_pos,
+
+                // Nose / cockpit (forward-facing guns area)
+                let nose_pos = fighter.position + fwd * 2.8;
+                let nose_matrix = glam::Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.7, 0.5, 0.8),
+                    rotation,
+                    nose_pos,
                 );
-                let exhaust_color = [3.0, 1.5, 0.3, 1.0];
-                let exhaust_instances = vec![InstanceData::new(exhaust_matrix.to_cols_array_2d(), exhaust_color)];
                 state.renderer.render_instanced_load(
                     &mut encoder,
                     &scene_view,
-                    &state.flash_mesh,
-                    &exhaust_instances,
+                    &state.environment_meshes.cube,
+                    &[InstanceData::new(nose_matrix.to_cols_array_2d(), dark_grey)],
                 );
+
+                // Twin engine nacelles (left and right, rear of fuselage)
+                let nacelle_offset = 1.35;
+                let nacelle_aft = 2.2;
+                let nacelle_scale = Vec3::new(0.55, 0.55, 1.6);
+                for side in [-1.0_f32, 1.0] {
+                    let nacelle_pos = fighter.position - fwd * nacelle_aft + right * (side * nacelle_offset);
+                    let nacelle_matrix = glam::Mat4::from_scale_rotation_translation(
+                        nacelle_scale,
+                        rotation,
+                        nacelle_pos,
+                    );
+                    state.renderer.render_instanced_load(
+                        &mut encoder,
+                        &scene_view,
+                        &state.environment_meshes.cube,
+                        &[InstanceData::new(nacelle_matrix.to_cols_array_2d(), dark_grey)],
+                    );
+                }
+
+                // Twin exhausts (one per engine — orange glow)
+                let exhaust_aft = 3.8;
+                let exhaust_color = [3.0, 1.5, 0.3, 1.0];
+                for side in [-1.0_f32, 1.0] {
+                    let exhaust_pos = fighter.position - fwd * exhaust_aft + right * (side * nacelle_offset);
+                    let exhaust_matrix = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::splat(1.0),
+                        Quat::IDENTITY,
+                        exhaust_pos,
+                    );
+                    state.renderer.render_instanced_load(
+                        &mut encoder,
+                        &scene_view,
+                        &state.flash_mesh,
+                        &[InstanceData::new(exhaust_matrix.to_cols_array_2d(), exhaust_color)],
+                    );
+                }
             }
         }
 
@@ -2326,125 +2457,122 @@ pub fn run(state: &mut GameState) -> Result<()> {
             }
         }
 
-        // Pass 5h: Extraction dropship (big retrieval boat)
+        // Pass 5h: DR-8 Skyhook extraction dropship (Fleet shuttle / retrieval boat)
+        // Ref: https://starshiptroopers.fandom.com/wiki/DR-8_Skyhook
         if let Some(ref dropship) = state.extraction {
-            // Only render when visible (Inbound phase onward)
             if dropship.phase != ExtractionPhase::Called {
                 let dist_sq = dropship.position.distance_squared(cam_pos);
-                // When climbing/docking: visible from surface in real time (boat at 3000m+)
                 let render_dist_sq = if dropship.roger_young_visible() {
                     4500.0 * 4500.0
                 } else {
                     800.0 * 800.0
                 };
                 if dist_sq < render_dist_sq {
-                    // ── Main hull: big, chunky transport ──
                     let vel = dropship.velocity;
                     let fwd = if vel.length_squared() > 1.0 {
                         vel.normalize()
                     } else {
-                        -dropship.approach_dir // face away from approach when hovering
+                        -dropship.approach_dir
                     };
                     let right = fwd.cross(Vec3::Y).normalize_or_zero();
-                    let up = right.cross(fwd).normalize_or_zero();
                     let rotation = if fwd.length_squared() > 0.01 {
                         Quat::from_rotation_arc(Vec3::Z, Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero())
                     } else {
                         Quat::IDENTITY
                     };
-                    // Big transport: wider and taller than the tac fighter
-                    let hull_scale = Vec3::new(6.0, 3.0, 14.0);
-                    let hull_matrix = glam::Mat4::from_scale_rotation_translation(
-                        hull_scale, rotation, dropship.position,
+                    let hull_grey = [0.20, 0.22, 0.26, 1.0];   // UCF Fleet grey
+                    let dark_grey = [0.14, 0.16, 0.19, 1.0];   // Nacelles / cockpit
+
+                    // ── Main cabin: compact shuttle body (angular box) ──
+                    let cabin_scale = Vec3::new(3.2, 1.0, 4.5);
+                    let cabin_matrix = glam::Mat4::from_scale_rotation_translation(
+                        cabin_scale, rotation, dropship.position,
                     );
-                    // Military olive drab hull
-                    let hull_color = [0.22, 0.24, 0.18, 1.0];
-                    let hull_inst = vec![InstanceData::new(hull_matrix.to_cols_array_2d(), hull_color)];
                     state.renderer.render_instanced_load(
                         &mut encoder, &scene_view,
-                        &state.environment_meshes.rock, // angular chunky shape
-                        &hull_inst,
+                        &state.environment_meshes.cube,
+                        &[InstanceData::new(cabin_matrix.to_cols_array_2d(), hull_grey)],
                     );
 
-                    // ── Twin engine pods (left + right) ──
-                    let engine_offset = 5.0;
-                    let engine_scale = Vec3::new(1.5, 1.5, 4.0);
+                    // ── Cockpit (2 pilots, front) ──
+                    let cockpit_pos = dropship.position + fwd * 2.6;
+                    let cockpit_matrix = glam::Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.9, 0.6, 1.0), rotation, cockpit_pos,
+                    );
+                    state.renderer.render_instanced_load(
+                        &mut encoder, &scene_view,
+                        &state.environment_meshes.cube,
+                        &[InstanceData::new(cockpit_matrix.to_cols_array_2d(), dark_grey)],
+                    );
+
+                    // ── Twin sublight thrusters (rear, left + right) ──
+                    let engine_offset = 2.0;
+                    let engine_scale = Vec3::new(0.5, 0.5, 1.2);
                     for side in [-1.0f32, 1.0] {
-                        let eng_pos = dropship.position + right * (side * engine_offset) - Vec3::Y * 0.5;
+                        let eng_pos = dropship.position - fwd * 2.4 + right * (side * engine_offset) - Vec3::Y * 0.2;
                         let eng_matrix = glam::Mat4::from_scale_rotation_translation(
                             engine_scale, rotation, eng_pos,
                         );
-                        let eng_color = [0.18, 0.18, 0.20, 1.0];
-                        let eng_inst = vec![InstanceData::new(eng_matrix.to_cols_array_2d(), eng_color)];
                         state.renderer.render_instanced_load(
                             &mut encoder, &scene_view,
-                            &state.environment_meshes.prop_sphere,
-                            &eng_inst,
+                            &state.environment_meshes.cube,
+                            &[InstanceData::new(eng_matrix.to_cols_array_2d(), dark_grey)],
                         );
-
-                        // Engine glow (intensity-driven)
-                        let glow_pos = eng_pos - fwd * 2.5 - Vec3::Y * 0.3;
-                        let glow_size = 1.0 + dropship.engine_intensity * 1.5;
+                        let glow_pos = eng_pos - fwd * 1.2 - Vec3::Y * 0.1;
+                        let glow_size = 0.6 + dropship.engine_intensity * 1.0;
                         let glow_matrix = glam::Mat4::from_scale_rotation_translation(
                             Vec3::splat(glow_size), Quat::IDENTITY, glow_pos,
                         );
                         let ei = dropship.engine_intensity;
-                        let glow_color = [2.0 * ei, 1.2 * ei, 0.3 * ei, ei]; // hot orange-yellow
-                        let glow_inst = vec![InstanceData::new(glow_matrix.to_cols_array_2d(), glow_color)];
+                        let glow_color = [1.8 * ei, 1.0 * ei, 0.25 * ei, ei];
                         state.renderer.render_instanced_load(
                             &mut encoder, &scene_view,
                             &state.flash_mesh,
-                            &glow_inst,
+                            &[InstanceData::new(glow_matrix.to_cols_array_2d(), glow_color)],
                         );
                     }
 
-                    // ── Landing lights (green when ramp open, white otherwise) ──
+                    // ── Rear ramp / landing light (green when open) ──
                     if dropship.ramp_open > 0.1 {
-                        let ramp_pos = dropship.position + fwd * -8.0 - Vec3::Y * 1.0;
+                        let ramp_light_pos = dropship.position + fwd * -4.0 - Vec3::Y * 0.6;
                         let ramp_matrix = glam::Mat4::from_scale_rotation_translation(
-                            Vec3::splat(2.0 * dropship.ramp_open), Quat::IDENTITY, ramp_pos,
+                            Vec3::splat(1.4 * dropship.ramp_open), Quat::IDENTITY, ramp_light_pos,
                         );
-                        let ramp_color = [0.2, 2.5, 0.3, dropship.ramp_open]; // green "go" light
-                        let ramp_inst = vec![InstanceData::new(ramp_matrix.to_cols_array_2d(), ramp_color)];
+                        let ramp_color = [0.2, 2.5, 0.3, dropship.ramp_open];
                         state.renderer.render_instanced_load(
                             &mut encoder, &scene_view,
                             &state.flash_mesh,
-                            &ramp_inst,
+                            &[InstanceData::new(ramp_matrix.to_cols_array_2d(), ramp_color)],
                         );
                     }
 
                     // ── Door gunner muzzle flashes ──
                     if dropship.gunners_active() {
                         let mut gun_flash_instances: Vec<InstanceData> = Vec::new();
-
-                        // Left gunner muzzle flash
                         if dropship.gunner_left_target.is_some() {
                             let flash = (state.time.elapsed_seconds() * 40.0).sin().abs();
                             if flash > 0.5 {
                                 let gpos = dropship.gunner_left_pos();
                                 let dir = dropship.gunner_left_target.map(|t| (t - gpos).normalize_or_zero()).unwrap_or(Vec3::Z);
-                                let flash_pos = gpos + dir * 1.0;
+                                let flash_pos = gpos + dir * 0.8;
                                 let m = glam::Mat4::from_scale_rotation_translation(
-                                    Vec3::splat(0.6), Quat::IDENTITY, flash_pos,
+                                    Vec3::splat(0.4), Quat::IDENTITY, flash_pos,
                                 );
                                 gun_flash_instances.push(InstanceData::new(m.to_cols_array_2d(), [4.0, 2.0, 0.3, 1.0]));
                             }
                         }
-
-                        // Right gunner muzzle flash
                         if dropship.gunner_right_target.is_some() {
                             let flash = (state.time.elapsed_seconds() * 40.0 + 1.5).sin().abs();
                             if flash > 0.5 {
                                 let gpos = dropship.gunner_right_pos();
                                 let dir = dropship.gunner_right_target.map(|t| (t - gpos).normalize_or_zero()).unwrap_or(Vec3::Z);
-                                let flash_pos = gpos + dir * 1.0;
+                                let flash_pos = gpos + dir * 0.8;
                                 let m = glam::Mat4::from_scale_rotation_translation(
-                                    Vec3::splat(0.6), Quat::IDENTITY, flash_pos,
+                                    Vec3::splat(0.4), Quat::IDENTITY, flash_pos,
                                 );
                                 gun_flash_instances.push(InstanceData::new(m.to_cols_array_2d(), [4.0, 2.0, 0.3, 1.0]));
                             }
                         }
-
                         if !gun_flash_instances.is_empty() {
                             state.renderer.render_instanced_load(
                                 &mut encoder, &scene_view,
@@ -2454,10 +2582,10 @@ pub fn run(state: &mut GameState) -> Result<()> {
                         }
                     }
 
-                    // ── Ramp walkway (visible solid surface from ground to door) ──
+                    // ── Ramp walkway (rear ramp down to ground) ──
                     if dropship.ramp_open > 0.1 {
                         let ramp_base = dropship.ramp_position();
-                        let ramp_top = dropship.position + dropship.approach_dir * 4.0 - Vec3::Y * 1.5;
+                        let ramp_top = dropship.position + dropship.approach_dir * 2.2 - Vec3::Y * 1.0;
                         let ramp_center = (ramp_base + ramp_top) * 0.5;
                         let ramp_dir = (ramp_top - ramp_base).normalize_or_zero();
                         let ramp_len = (ramp_top - ramp_base).length();
@@ -2466,16 +2594,15 @@ pub fn run(state: &mut GameState) -> Result<()> {
                         } else {
                             Quat::IDENTITY
                         };
-                        let ramp_scale = Vec3::new(2.5, ramp_len * 0.5, 0.2);
+                        let ramp_scale = Vec3::new(1.6, ramp_len * 0.5, 0.15);
                         let ramp_m = glam::Mat4::from_scale_rotation_translation(
                             ramp_scale, ramp_rot, ramp_center,
                         );
-                        let ramp_color = [0.25, 0.25, 0.22, dropship.ramp_open];
-                        let ramp_inst = vec![InstanceData::new(ramp_m.to_cols_array_2d(), ramp_color)];
+                        let ramp_color = [0.22, 0.22, 0.20, dropship.ramp_open];
                         state.renderer.render_instanced_load(
                             &mut encoder, &scene_view,
-                            &state.environment_meshes.rock,
-                            &ramp_inst,
+                            &state.environment_meshes.cube,
+                            &[InstanceData::new(ramp_m.to_cols_array_2d(), ramp_color)],
                         );
                     }
                 }

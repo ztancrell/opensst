@@ -13,15 +13,15 @@ Generated from a project review. Check off as you go.
 
 ## Code structure & tech debt
 
-- [ ] **Shrink `main.rs`** – Still ~5,700 lines. MODULARIZATION.md suggests moving more out: init/event loop into smaller modules, or moving `GameState` + big `impl` blocks into a dedicated module so `main.rs` is mostly wiring.
+- [ ] **Shrink `main.rs`** – Event handling moved to `events.rs` (~250 lines). Still ~7,000 lines; move `GameState` + big `impl` blocks into a dedicated module so `main.rs` is mostly wiring.
 - [ ] **Finish render split** – MODULARIZATION Phase 1.4: `render/ship.rs` and `render/planet.rs` were placeholders. Move ship-interior and planet/terrain render logic out of `render/mod.rs` into those submodules where it makes sense.
-- [ ] **Audio: use it or drop it** – `crates/audio` is implemented (Kira, spatial sound) and the game crate depends on it, but the game never constructs or uses `AudioSystem`. Either wire up audio (weapons, footsteps, bugs, music) or remove the dependency to simplify builds and avoid confusing contributors.
+- [x] **Audio: use it or drop it** – Game crate no longer depends on `audio`; dependency commented out with note in Cargo.toml and README. Wire up when ready (see docs/IMPROVEMENTS.md).
 
 ---
 
 ## Testing & CI
 
-- [ ] **Add tests** – No `#[test]` or integration tests found. Start with unit tests for procgen (terrain, flow field, bug mesh), physics helpers, or mission/score logic so refactors stay safe.
+- [x] **Add tests** – Unit tests added: procgen (terrain, flow field, universe), and game crate `state::tests` for `DebugSettings` (menu_item_count, toggle_selected). Add more for mission/score or save round-trip as needed.
 - [x] **Add CI** – No `.github/workflows`. Add a workflow that runs `cargo build` and `cargo test` (when tests exist) on push/PR (e.g. `stable` Linux and maybe Windows/macOS) so PRs stay buildable and testable.
 
 ---

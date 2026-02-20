@@ -33,6 +33,7 @@ mod artillery;
 mod citizen;
 mod dialogue;
 mod earth_territory;
+mod events;
 mod tac_fighter;
 mod viewmodel;
 mod weapons;
@@ -44,7 +45,7 @@ use glam::{DVec3, Quat, Vec3};
 use hecs::{Entity, World};
 use input::InputState;
 use physics::PhysicsWorld;
-use procgen::{BiomeType, FlowField, Planet, PlanetBiomes, PlanetClassification, StarSystem, Universe, TerrainConfig, TerrainData};
+use procgen::{BiomeType, FlowField, Planet, PlanetBiomes, PlanetClassification, StarSystem, Universe, TerrainConfig, VoxelChunk};
 use rapier3d::prelude::ColliderHandle;
 use renderer::{Camera, CelestialBodyInstance, InstanceData, Mesh, OverlayTextBuilder, Renderer, DEFORM_HALF_SIZE, DEFORM_TEXTURE_SIZE};
 use std::collections::{HashMap, HashSet};
@@ -142,6 +143,8 @@ pub struct GameState {
     current_planet_idx: Option<usize>,   // None = in open space
     universe_position: DVec3,            // true position in solar system coords
     orbital_time: f64,                   // drives planet orbits
+    /// Real-time seconds since game start (or scaled). Drives planet rotation for day/night.
+    universe_time_sec: f64,
 
     // Galaxy map
     galaxy_map_open: bool,
@@ -1307,7 +1310,7 @@ impl EnvironmentMeshes {
 
 /// Per-chunk data: terrain heightmap, GPU mesh, water mesh, and physics collider.
 struct TerrainChunkData {
-    terrain: TerrainData,
+    voxel: VoxelChunk,
     mesh: Mesh,
     water_mesh: Option<Mesh>,
     collider_handle: ColliderHandle,
@@ -1340,9 +1343,9 @@ impl ChunkManager {
     ) -> Self {
         Self {
             chunks: HashMap::new(),
-            chunk_size: 64.0,
-            chunk_resolution: 96, // 96 verts per side (~0.67m cells) – finer detail for shovel/explosion deformation
-            view_distance: 3,
+            chunk_size: 96.0,   // larger chunks = more terrain per chunk, more destruction area
+            chunk_resolution: 128, // finer heightmap for more deformation detail
+            view_distance: 5,  // big infinite voxel world: load more chunks (Minecraft-style draw)
             planet_seed,
             height_scale,
             frequency,
@@ -1377,6 +1380,7 @@ impl ChunkManager {
         self.frequency = frequency;
         self.planet_biomes = planet_biomes;
         self.use_smooth_terrain = use_smooth_terrain;
+        self.chunk_resolution = if use_smooth_terrain { 160 } else { 128 };
     }
 
     /// Map a world-space X or Z coordinate to the chunk index that contains it.
@@ -1490,12 +1494,7 @@ impl ChunkManager {
         device: &wgpu::Device,
         physics: &mut PhysicsWorld,
     ) -> TerrainChunkData {
-        let has_water = self
-            .planet_biomes
-            .biomes
-            .iter()
-            .any(|b| procgen::BiomeConfig::from_type(*b).has_water());
-        let mut config = TerrainConfig {
+        let config = TerrainConfig {
             size: self.chunk_size,
             resolution: self.chunk_resolution,
             height_scale: self.height_scale,
@@ -1503,19 +1502,13 @@ impl ChunkManager {
             offset_x: cx as f32 * self.chunk_size,
             offset_z: cz as f32 * self.chunk_size,
             seed: self.planet_seed,
-            water_level: if has_water { Some(0.35) } else { None },
-            water_coverage: if has_water { 0.45 } else { 0.0 },
             ..Default::default()
         };
-        if self.use_smooth_terrain {
-            config.voxel_size = None;
-            config.persistence = 0.4;
-        }
-        let terrain = TerrainData::generate(config, Some(&self.planet_biomes));
+        let voxel = VoxelChunk::generate(&config, Some(&self.planet_biomes));
 
-        // Build GPU mesh (pass per-vertex biome color through)
-        let vertices: Vec<renderer::Vertex> = terrain
-            .vertices
+        // Build GPU mesh from voxel (culled cube faces; water excluded for transparent pass)
+        let (terrain_vertices, terrain_indices) = voxel.to_mesh();
+        let vertices: Vec<renderer::Vertex> = terrain_vertices
             .iter()
             .map(|v| renderer::Vertex {
                 position: v.position,
@@ -1524,14 +1517,14 @@ impl ChunkManager {
                 color: v.color,
             })
             .collect();
-        let mesh = Mesh::from_data(device, &vertices, &terrain.indices);
+        let mesh = Mesh::from_data(device, &vertices, &terrain_indices);
 
-        // Build water mesh if chunk has water
-        let water_mesh = if terrain.water_vertices.is_empty() {
+        // Transparent water mesh (Minecraft-style)
+        let (water_vertices, water_indices) = voxel.to_water_mesh();
+        let water_mesh = if water_vertices.is_empty() {
             None
         } else {
-            let water_vertices: Vec<renderer::Vertex> = terrain
-                .water_vertices
+            let wv: Vec<renderer::Vertex> = water_vertices
                 .iter()
                 .map(|v| renderer::Vertex {
                     position: v.position,
@@ -1540,23 +1533,27 @@ impl ChunkManager {
                     color: v.color,
                 })
                 .collect();
-            Some(Mesh::from_data(device, &water_vertices, &terrain.water_indices))
+            Some(Mesh::from_data(device, &wv, &water_indices))
         };
 
-        // Add physics heightfield at chunk offset
-        let res = terrain.config.resolution as usize;
+        // Add physics heightfield from voxel top surface (translation = chunk min corner, not center)
+        let heightmap = voxel.to_heightmap();
+        let nrows = voxel.nz + 1;
+        let ncols = voxel.nx + 1;
+        let offset_min_x = voxel.offset_x - self.chunk_size * 0.5;
+        let offset_min_z = voxel.offset_z - self.chunk_size * 0.5;
         let collider_handle = physics.add_terrain_heightfield_at(
-            &terrain.heightmap,
-            res,
-            res,
-            terrain.config.size,
-            terrain.config.size,
-            terrain.config.offset_x,
-            terrain.config.offset_z,
+            &heightmap,
+            nrows,
+            ncols,
+            self.chunk_size,
+            self.chunk_size,
+            offset_min_x,
+            offset_min_z,
         );
 
         TerrainChunkData {
-            terrain,
+            voxel,
             mesh,
             water_mesh,
             collider_handle,
@@ -1568,7 +1565,7 @@ impl ChunkManager {
         let cx = Self::world_to_chunk(x, self.chunk_size);
         let cz = Self::world_to_chunk(z, self.chunk_size);
         if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-            chunk.terrain.sample_height(x, z)
+            chunk.voxel.sample_height(x, z)
         } else {
             0.0 // Chunk not loaded, fallback
         }
@@ -1583,10 +1580,13 @@ impl ChunkManager {
             .then(|| 0.35 * self.height_scale)
     }
 
-    /// True if position (x,z) is in a water basin (terrain below water level).
+    /// True when the surface at (x,z) is water (not just "below water level").
+    /// Crater floors and dry terrain below sea level are not treated as water.
     pub fn is_in_water(&self, x: f32, z: f32) -> bool {
-        if let Some(wl) = self.water_level() {
-            self.sample_height(x, z) < wl
+        let cx = Self::world_to_chunk(x, self.chunk_size);
+        let cz = Self::world_to_chunk(z, self.chunk_size);
+        if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+            chunk.voxel.surface_block_at(x, z) == Some(procgen::BlockId::Water)
         } else {
             false
         }
@@ -1604,229 +1604,26 @@ impl ChunkManager {
         let cx = Self::world_to_chunk(x, self.chunk_size);
         let cz = Self::world_to_chunk(z, self.chunk_size);
         if let Some(chunk) = self.chunks.get(&(cx, cz)) {
-            chunk.terrain.sample_height(x, z)
+            chunk.voxel.sample_height(x, z)
         } else {
             fallback
         }
     }
 
-    /// Simulate terrain collapse (sand/gravel physics): steep slopes slump to angle of repose.
-    /// Run after deformation so excavated terrain falls realistically.
-    /// Returns chunk keys that need mesh+collider rebuild (caller adds to pending and processes throttled).
+    /// Simulate terrain collapse (sand/gravel physics). No-op for voxel terrain; returns keys to rebuild.
     fn simulate_terrain_collapse(
         &mut self,
         chunk_keys: &[(i32, i32)],
         _device: &wgpu::Device,
         _physics: &mut PhysicsWorld,
     ) -> Vec<(i32, i32)> {
-        const ANGLE_OF_REPOSE_DEG: f32 = 38.0;
-        const ITERATIONS: usize = 5; // Reduced from 8 — most settling happens in first few
-
-        let res = self.chunk_resolution as usize;
-        let res_sq = res * res;
-        let step = self.chunk_size / (self.chunk_resolution - 1) as f32;
-        let max_diff = step * ANGLE_OF_REPOSE_DEG.to_radians().tan();
-        let transfer_factor = 0.35;
-
-        // HashSet for O(1) neighbor lookup when building all_keys
-        let mut key_set = HashSet::new();
-        for &k in chunk_keys {
-            key_set.insert(k);
-        }
-        for &(cx, cz) in chunk_keys {
-            for (dcx, dcz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                let k = (cx + dcx, cz + dcz);
-                if self.chunks.contains_key(&k) {
-                    key_set.insert(k);
-                }
-            }
-        }
-        let all_keys: Vec<(i32, i32)> = key_set.into_iter().collect();
-        if all_keys.is_empty() {
-            return chunk_keys.to_vec();
-        }
-
-        // Reuse buffers across iterations to avoid alloc
-        let mut deltas: HashMap<(i32, i32), Vec<f32>> = HashMap::with_capacity(all_keys.len());
-        for &k in &all_keys {
-            deltas.insert(k, vec![0.0; res_sq]);
-        }
-        let mut height_snapshot: HashMap<(i32, i32), Vec<f32>> = HashMap::with_capacity(all_keys.len());
-        let mut chunks_modified: HashSet<(i32, i32)> = chunk_keys.iter().copied().collect(); // Always rebuild deformed chunks
-
-        for _ in 0..ITERATIONS {
-            // Snapshot heights once per iteration (avoids 4× get_vertex_height per cell)
-            for &k in &all_keys {
-                if let Some(chunk) = self.chunks.get(&k) {
-                    height_snapshot
-                        .entry(k)
-                        .or_insert_with(|| vec![0.0; res_sq])
-                        .copy_from_slice(&chunk.terrain.heightmap);
-                }
-            }
-
-            for d in deltas.values_mut() {
-                d.fill(0.0);
-            }
-
-            let mut iter_modified = false;
-            for &(cx, cz) in &all_keys {
-                let heights = match height_snapshot.get(&(cx, cz)) {
-                    Some(h) => h.as_slice(),
-                    None => continue,
-                };
-
-                for z in 0..res {
-                    for x in 0..res {
-                        let idx = z * res + x;
-                        let h = heights[idx];
-
-                        // 4 neighbors: left, right, down, up — direct index when same chunk
-                        let neighbors = [
-                            (x.checked_sub(1).map(|nx| (cx, cz, nx, z)).unwrap_or((cx - 1, cz, res - 1, z))),
-                            (if x + 1 < res { (cx, cz, x + 1, z) } else { (cx + 1, cz, 0, z) }),
-                            (z.checked_sub(1).map(|nz| (cx, cz, x, nz)).unwrap_or((cx, cz - 1, x, res - 1))),
-                            (if z + 1 < res { (cx, cz, x, z + 1) } else { (cx, cz + 1, x, 0) }),
-                        ];
-                        for (ncx, ncz, ni, nj) in neighbors {
-                            // Skip neighbors in unloaded chunks — treating them as 0 caused terrain to collapse into void
-                            let hn = match height_snapshot.get(&(ncx, ncz)) {
-                                Some(snap) => snap[nj * res + ni],
-                                None => continue, // Neighbor chunk not loaded, skip this direction
-                            };
-                            let diff = h - hn;
-                            if diff > max_diff {
-                                let transfer = (diff - max_diff) * transfer_factor * 0.25;
-                                let nidx = nj * res + ni;
-                                if (cx, cz) == (ncx, ncz) {
-                                    if let Some(d) = deltas.get_mut(&(cx, cz)) {
-                                        d[idx] -= transfer;
-                                        d[nidx] += transfer;
-                                    }
-                                } else {
-                                    if let Some(d) = deltas.get_mut(&(cx, cz)) {
-                                        d[idx] -= transfer;
-                                    }
-                                    if let Some(nd) = deltas.get_mut(&(ncx, ncz)) {
-                                        nd[nidx] += transfer;
-                                    }
-                                }
-                                chunks_modified.insert((cx, cz));
-                                chunks_modified.insert((ncx, ncz));
-                                iter_modified = true;
-                            } else if hn - h > max_diff {
-                                let transfer = (hn - h - max_diff) * transfer_factor * 0.25;
-                                let nidx = nj * res + ni;
-                                if (cx, cz) == (ncx, ncz) {
-                                    if let Some(d) = deltas.get_mut(&(cx, cz)) {
-                                        d[idx] += transfer;
-                                        d[nidx] -= transfer;
-                                    }
-                                } else {
-                                    if let Some(d) = deltas.get_mut(&(cx, cz)) {
-                                        d[idx] += transfer;
-                                    }
-                                    if let Some(nd) = deltas.get_mut(&(ncx, ncz)) {
-                                        nd[nidx] -= transfer;
-                                    }
-                                }
-                                chunks_modified.insert((cx, cz));
-                                chunks_modified.insert((ncx, ncz));
-                                iter_modified = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !iter_modified {
-                break;
-            }
-
-            for &(cx, cz) in &chunks_modified {
-                if let (Some(chunk), Some(d)) = (self.chunks.get_mut(&(cx, cz)), deltas.get(&(cx, cz))) {
-                    let voxel_size = chunk.terrain.config.voxel_size;
-                    for (idx, delta) in d.iter().enumerate() {
-                        if *delta == 0.0 {
-                            continue;
-                        }
-                        let new_h = chunk.terrain.heightmap[idx] + delta;
-                        let final_h = match voxel_size {
-                            Some(vs) => procgen::quantize_height(new_h, vs),
-                            None => new_h,
-                        };
-                        chunk.terrain.heightmap[idx] = final_h;
-                        chunk.terrain.vertices[idx].position[1] = final_h;
-                    }
-                    chunk.terrain.recalculate_normals();
-                }
-            }
-        }
-
-        chunks_modified.into_iter().collect()
+        // Voxel terrain: no heightfield collapse; just return deformed chunks for rebuild
+        chunk_keys.to_vec()
     }
 
-    /// Sync height at shared edges between modified chunks and their loaded neighbors to remove seams.
-    /// Returns all chunk keys that need a mesh+collider rebuild (modified + neighbors we touched).
+    /// Sync height at shared edges between modified chunks. No-op for voxel; returns keys to rebuild.
     fn sync_chunk_edge_heights(&mut self, modified_keys: &[(i32, i32)]) -> Vec<(i32, i32)> {
-        let res = self.chunk_resolution as usize;
-        // (neighbor_key, vertex_index, new_height)
-        let mut updates: Vec<((i32, i32), usize, f32)> = Vec::new();
-        for &(cx, cz) in modified_keys {
-            let chunk = match self.chunks.get(&(cx, cz)) {
-                Some(c) => c,
-                None => continue,
-            };
-            let heights = &chunk.terrain.heightmap;
-            // Left edge (x=0) -> neighbor (cx-1, cz) right edge (x=res-1)
-            if let Some(_) = self.chunks.get(&(cx - 1, cz)) {
-                for z in 0..res {
-                    let idx = z * res;
-                    updates.push(((cx - 1, cz), z * res + (res - 1), heights[idx]));
-                }
-            }
-            // Right edge (x=res-1) -> neighbor (cx+1, cz) left edge (x=0)
-            if let Some(_) = self.chunks.get(&(cx + 1, cz)) {
-                for z in 0..res {
-                    let idx = z * res + (res - 1);
-                    updates.push(((cx + 1, cz), z * res, heights[idx]));
-                }
-            }
-            // Bottom edge (z=0) -> neighbor (cx, cz-1) top edge (z=res-1)
-            if let Some(_) = self.chunks.get(&(cx, cz - 1)) {
-                for x in 0..res {
-                    let idx = x;
-                    updates.push(((cx, cz - 1), (res - 1) * res + x, heights[idx]));
-                }
-            }
-            // Top edge (z=res-1) -> neighbor (cx, cz+1) bottom edge (z=0)
-            if let Some(_) = self.chunks.get(&(cx, cz + 1)) {
-                for x in 0..res {
-                    let idx = (res - 1) * res + x;
-                    updates.push(((cx, cz + 1), x, heights[idx]));
-                }
-            }
-        }
-        let mut neighbor_keys = std::collections::HashSet::new();
-        for (nkey, idx, h) in updates {
-            if let Some(chunk) = self.chunks.get_mut(&nkey) {
-                chunk.terrain.heightmap[idx] = h;
-                chunk.terrain.vertices[idx].position[1] = h;
-                neighbor_keys.insert(nkey);
-            }
-        }
-        for nkey in &neighbor_keys {
-            if let Some(chunk) = self.chunks.get_mut(nkey) {
-                chunk.terrain.recalculate_normals();
-            }
-        }
-        let mut out: Vec<(i32, i32)> = modified_keys.to_vec();
-        for k in neighbor_keys {
-            if !out.contains(&k) {
-                out.push(k);
-            }
-        }
-        out
+        modified_keys.to_vec()
     }
 
     /// Flatten terrain inside a circle to a single height (e.g. city core). Returns chunk keys modified.
@@ -1837,9 +1634,6 @@ impl ChunkManager {
         radius: f32,
         flat_height: f32,
     ) -> Vec<(i32, i32)> {
-        let res = self.chunk_resolution as usize;
-        let step = self.chunk_size / (self.chunk_resolution - 1) as f32;
-        let half_size = self.chunk_size * 0.5;
         let r2 = radius * radius;
         let min_cx = Self::world_to_chunk(center_x - radius, self.chunk_size);
         let max_cx = Self::world_to_chunk(center_x + radius, self.chunk_size);
@@ -1850,25 +1644,21 @@ impl ChunkManager {
             for cx in min_cx..=max_cx {
                 let key = (cx, cz);
                 let Some(chunk) = self.chunks.get_mut(&key) else { continue };
-                let offset_x = cx as f32 * self.chunk_size;
-                let offset_z = cz as f32 * self.chunk_size;
                 let mut any = false;
-                for z in 0..res {
-                    for x in 0..res {
-                        let world_x = offset_x - half_size + x as f32 * step;
-                        let world_z = offset_z - half_size + z as f32 * step;
-                        let dx = world_x - center_x;
-                        let dz = world_z - center_z;
+                for iz in 0..chunk.voxel.nz {
+                    for ix in 0..chunk.voxel.nx {
+                        let wx = chunk.voxel.world_x(ix);
+                        let wz = chunk.voxel.world_z(iz);
+                        let dx = wx - center_x;
+                        let dz = wz - center_z;
                         if dx * dx + dz * dz <= r2 {
-                            let idx = z * res + x;
-                            chunk.terrain.heightmap[idx] = flat_height;
-                            chunk.terrain.vertices[idx].position[1] = flat_height;
-                            any = true;
+                            if chunk.voxel.set_column_height(ix, iz, flat_height) {
+                                any = true;
+                            }
                         }
                     }
                 }
                 if any {
-                    chunk.terrain.recalculate_normals();
                     modified.push(key);
                 }
             }
@@ -1886,36 +1676,28 @@ impl ChunkManager {
         max_z: f32,
         flat_height: f32,
     ) -> Vec<(i32, i32)> {
-        let res = self.chunk_resolution as usize;
-        let step = self.chunk_size / (self.chunk_resolution - 1) as f32;
-        let half_size = self.chunk_size * 0.5;
-        let mut modified = Vec::new();
-        // Chunks that overlap the rect
         let min_cx = Self::world_to_chunk(min_x, self.chunk_size);
         let max_cx = Self::world_to_chunk(max_x, self.chunk_size);
         let min_cz = Self::world_to_chunk(min_z, self.chunk_size);
         let max_cz = Self::world_to_chunk(max_z, self.chunk_size);
+        let mut modified = Vec::new();
         for cz in min_cz..=max_cz {
             for cx in min_cx..=max_cx {
                 let key = (cx, cz);
                 let Some(chunk) = self.chunks.get_mut(&key) else { continue };
-                let offset_x = cx as f32 * self.chunk_size;
-                let offset_z = cz as f32 * self.chunk_size;
                 let mut any = false;
-                for z in 0..res {
-                    for x in 0..res {
-                        let world_x = offset_x - half_size + x as f32 * step;
-                        let world_z = offset_z - half_size + z as f32 * step;
-                        if world_x >= min_x && world_x <= max_x && world_z >= min_z && world_z <= max_z {
-                            let idx = z * res + x;
-                            chunk.terrain.heightmap[idx] = flat_height;
-                            chunk.terrain.vertices[idx].position[1] = flat_height;
-                            any = true;
+                for iz in 0..chunk.voxel.nz {
+                    for ix in 0..chunk.voxel.nx {
+                        let wx = chunk.voxel.world_x(ix);
+                        let wz = chunk.voxel.world_z(iz);
+                        if wx >= min_x && wx <= max_x && wz >= min_z && wz <= max_z {
+                            if chunk.voxel.set_column_height(ix, iz, flat_height) {
+                                any = true;
+                            }
                         }
                     }
                 }
                 if any {
-                    chunk.terrain.recalculate_normals();
                     modified.push(key);
                 }
             }
@@ -1935,10 +1717,6 @@ impl ChunkManager {
     ) -> Vec<(i32, i32)> {
         let c = rotation_y_rad.cos();
         let s = rotation_y_rad.sin();
-        let res = self.chunk_resolution as usize;
-        let step = self.chunk_size / (self.chunk_resolution - 1) as f32;
-        let half_size = self.chunk_size * 0.5;
-        // Axis-aligned bounding box of the rotated rect for chunk range
         let extent = half_len + half_w;
         let min_x = cx - extent;
         let max_x = cx + extent;
@@ -1953,27 +1731,23 @@ impl ChunkManager {
             for cx_key in min_cx..=max_cx {
                 let key = (cx_key, cz_key);
                 let Some(chunk) = self.chunks.get_mut(&key) else { continue };
-                let offset_x = cx_key as f32 * self.chunk_size;
-                let offset_z = cz_key as f32 * self.chunk_size;
                 let mut any = false;
-                for z in 0..res {
-                    for x in 0..res {
-                        let world_x = offset_x - half_size + x as f32 * step;
-                        let world_z = offset_z - half_size + z as f32 * step;
+                for iz in 0..chunk.voxel.nz {
+                    for ix in 0..chunk.voxel.nx {
+                        let world_x = chunk.voxel.world_x(ix);
+                        let world_z = chunk.voxel.world_z(iz);
                         let rel_x = world_x - cx;
                         let rel_z = world_z - cz;
                         let local_along = rel_x * s + rel_z * c;
                         let local_across = -rel_x * c + rel_z * s;
                         if local_along.abs() <= half_len && local_across.abs() <= half_w {
-                            let idx = z * res + x;
-                            chunk.terrain.heightmap[idx] = flat_height;
-                            chunk.terrain.vertices[idx].position[1] = flat_height;
-                            any = true;
+                            if chunk.voxel.set_column_height(ix, iz, flat_height) {
+                                any = true;
+                            }
                         }
                     }
                 }
                 if any {
-                    chunk.terrain.recalculate_normals();
                     modified.push(key);
                 }
             }
@@ -1981,7 +1755,7 @@ impl ChunkManager {
         modified
     }
 
-    /// Rebuild mesh, water mesh, and collider for a chunk after terrain modification.
+    /// Rebuild mesh and collider for a chunk after terrain modification.
     fn rebuild_chunk_mesh_and_collider(
         &mut self,
         key: (i32, i32),
@@ -1989,9 +1763,8 @@ impl ChunkManager {
         physics: &mut PhysicsWorld,
     ) {
         if let Some(chunk) = self.chunks.get_mut(&key) {
-            let vertices: Vec<renderer::Vertex> = chunk
-                .terrain
-                .vertices
+            let (terrain_vertices, terrain_indices) = chunk.voxel.to_mesh();
+            let vertices: Vec<renderer::Vertex> = terrain_vertices
                 .iter()
                 .map(|v| renderer::Vertex {
                     position: v.position,
@@ -2000,14 +1773,12 @@ impl ChunkManager {
                     color: v.color,
                 })
                 .collect();
-            chunk.mesh = Mesh::from_data(device, &vertices, &chunk.terrain.indices);
-            chunk.terrain.regenerate_water_mesh();
-            chunk.water_mesh = if chunk.terrain.water_vertices.is_empty() {
+            chunk.mesh = Mesh::from_data(device, &vertices, &terrain_indices);
+            let (water_vertices, water_indices) = chunk.voxel.to_water_mesh();
+            chunk.water_mesh = if water_vertices.is_empty() {
                 None
             } else {
-                let wv: Vec<renderer::Vertex> = chunk
-                    .terrain
-                    .water_vertices
+                let wv: Vec<renderer::Vertex> = water_vertices
                     .iter()
                     .map(|v| renderer::Vertex {
                         position: v.position,
@@ -2016,18 +1787,22 @@ impl ChunkManager {
                         color: v.color,
                     })
                     .collect();
-                Some(Mesh::from_data(device, &wv, &chunk.terrain.water_indices))
+                Some(Mesh::from_data(device, &wv, &water_indices))
             };
             physics.remove_collider(chunk.collider_handle);
-            let res = chunk.terrain.config.resolution as usize;
+            let heightmap = chunk.voxel.to_heightmap();
+            let nrows = chunk.voxel.nz + 1;
+            let ncols = chunk.voxel.nx + 1;
+            let offset_min_x = chunk.voxel.offset_x - self.chunk_size * 0.5;
+            let offset_min_z = chunk.voxel.offset_z - self.chunk_size * 0.5;
             chunk.collider_handle = physics.add_terrain_heightfield_at(
-                &chunk.terrain.heightmap,
-                res,
-                res,
-                chunk.terrain.config.size,
-                chunk.terrain.config.size,
-                chunk.terrain.config.offset_x,
-                chunk.terrain.config.offset_z,
+                &heightmap,
+                nrows,
+                ncols,
+                self.chunk_size,
+                self.chunk_size,
+                offset_min_x,
+                offset_min_z,
             );
         }
     }
@@ -2037,9 +1812,9 @@ impl ChunkManager {
         &mut self,
         world_pos: Vec3,
         radius: f32,
-        depth: f32,
-        device: &wgpu::Device,
-        physics: &mut PhysicsWorld,
+        _depth: f32,
+        _device: &wgpu::Device,
+        _physics: &mut PhysicsWorld,
     ) {
         let min_cx = Self::world_to_chunk(world_pos.x - radius, self.chunk_size);
         let max_cx = Self::world_to_chunk(world_pos.x + radius, self.chunk_size);
@@ -2050,21 +1825,25 @@ impl ChunkManager {
         for cz in min_cz..=max_cz {
             for cx in min_cx..=max_cx {
                 if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                    if chunk.terrain.deform_crater(world_pos.x, world_pos.z, radius, depth) {
+                    if chunk.voxel.deform_sphere(
+                        world_pos.x,
+                        world_pos.y,
+                        world_pos.z,
+                        radius,
+                    ) {
                         affected_keys.push((cx, cz));
                     }
                 }
             }
         }
-        // Terrain physics: steep slopes collapse (sand/gravel angle of repose)
         if !affected_keys.is_empty() {
-            let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
-            let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
+            let to_rebuild = self.sync_chunk_edge_heights(&affected_keys);
             self.pending_chunk_rebuilds.extend(to_rebuild);
         }
     }
 
     /// Ace of Spades–style blocky dig: one block removed at the cell containing world_pos.
+    /// If water_level is Some, water fills the crater below that world Y (flowing physics).
     /// Rebuilds mesh + collider for affected chunks.
     fn deform_at_blocky(
         &mut self,
@@ -2072,6 +1851,7 @@ impl ChunkManager {
         block_size: f32,
         device: &wgpu::Device,
         physics: &mut PhysicsWorld,
+        water_level: Option<f32>,
     ) {
         let radius = block_size;
         let min_cx = Self::world_to_chunk(world_pos.x - radius, self.chunk_size);
@@ -2083,15 +1863,28 @@ impl ChunkManager {
         for cz in min_cz..=max_cz {
             for cx in min_cx..=max_cx {
                 if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                    if chunk.terrain.deform_crater_blocky(world_pos.x, world_pos.z, block_size) {
+                    if chunk.voxel.deform_sphere(
+                        world_pos.x,
+                        world_pos.y,
+                        world_pos.z,
+                        radius,
+                    ) {
+                        if let Some(wl) = water_level {
+                            chunk.voxel.fill_water_in_sphere_below(
+                                world_pos.x,
+                                world_pos.y,
+                                world_pos.z,
+                                radius,
+                                wl,
+                            );
+                        }
                         affected_keys.push((cx, cz));
                     }
                 }
             }
         }
         if !affected_keys.is_empty() {
-            let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
-            let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
+            let to_rebuild = self.sync_chunk_edge_heights(&affected_keys);
             self.pending_chunk_rebuilds.extend(to_rebuild);
         }
     }
@@ -2101,8 +1894,8 @@ impl ChunkManager {
         &mut self,
         world_pos: Vec3,
         block_size: f32,
-        device: &wgpu::Device,
-        physics: &mut PhysicsWorld,
+        _device: &wgpu::Device,
+        _physics: &mut PhysicsWorld,
     ) {
         let radius = block_size;
         let min_cx = Self::world_to_chunk(world_pos.x - radius, self.chunk_size);
@@ -2114,15 +1907,20 @@ impl ChunkManager {
         for cz in min_cz..=max_cz {
             for cx in min_cx..=max_cx {
                 if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                    if chunk.terrain.deform_mound_blocky(world_pos.x, world_pos.z, block_size) {
+                    if chunk.voxel.fill_sphere(
+                        world_pos.x,
+                        world_pos.y,
+                        world_pos.z,
+                        radius,
+                        procgen::BlockId::Dirt,
+                    ) {
                         affected_keys.push((cx, cz));
                     }
                 }
             }
         }
         if !affected_keys.is_empty() {
-            let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
-            let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
+            let to_rebuild = self.sync_chunk_edge_heights(&affected_keys);
             self.pending_chunk_rebuilds.extend(to_rebuild);
         }
     }
@@ -2147,9 +1945,9 @@ impl ChunkManager {
         &mut self,
         world_pos: Vec3,
         radius: f32,
-        height: f32,
-        device: &wgpu::Device,
-        physics: &mut PhysicsWorld,
+        _height: f32,
+        _device: &wgpu::Device,
+        _physics: &mut PhysicsWorld,
     ) {
         let min_cx = Self::world_to_chunk(world_pos.x - radius, self.chunk_size);
         let max_cx = Self::world_to_chunk(world_pos.x + radius, self.chunk_size);
@@ -2160,15 +1958,20 @@ impl ChunkManager {
         for cz in min_cz..=max_cz {
             for cx in min_cx..=max_cx {
                 if let Some(chunk) = self.chunks.get_mut(&(cx, cz)) {
-                    if chunk.terrain.deform_mound(world_pos.x, world_pos.z, radius, height) {
+                    if chunk.voxel.fill_sphere(
+                        world_pos.x,
+                        world_pos.y,
+                        world_pos.z,
+                        radius,
+                        procgen::BlockId::Dirt,
+                    ) {
                         affected_keys.push((cx, cz));
                     }
                 }
             }
         }
         if !affected_keys.is_empty() {
-            let collapse_keys = self.simulate_terrain_collapse(&affected_keys, device, physics);
-            let to_rebuild = self.sync_chunk_edge_heights(&collapse_keys);
+            let to_rebuild = self.sync_chunk_edge_heights(&affected_keys);
             self.pending_chunk_rebuilds.extend(to_rebuild);
         }
     }
@@ -2403,6 +2206,7 @@ impl GameState {
             current_planet_idx: Some(first_planet_idx),
             universe_position: DVec3::ZERO,
             orbital_time: 0.0,
+            universe_time_sec: 0.0,
             galaxy_map_open: false,
             galaxy_map_selected: 0,
             warp_sequence: None,
@@ -2522,21 +2326,10 @@ impl GameState {
         // Process debug actions (execute one-shot requests)
         self.process_debug_actions();
 
-        // Time of day: when on a planet, derive from orbit so sky/terrain lighting matches Roger Young view
+        // Time of day: real-time dynamic cycle from star position and planet rotation (per-system, per-planet)
         if !self.debug.freeze_time_of_day {
-            if let Some(planet_idx) = self.current_planet_idx {
-                if let Some(body) = self.current_system.bodies.get(planet_idx) {
-                    let angle = body.orbital_phase as f64 + self.orbital_time * body.orbital_speed as f64;
-                    let angle_norm = (angle / std::f64::consts::TAU).rem_euclid(1.0) as f32;
-                    // Orbital angle 0 = planet at +X, star at -X = dusk (t=0.5); day_length_mult scales cycle
-                    self.time_of_day = (angle_norm * self.planet.day_length_mult + 0.5).rem_euclid(1.0);
-                }
-            } else {
-                self.time_of_day += dt / 180.0;
-                if self.time_of_day >= 1.0 {
-                    self.time_of_day -= 1.0;
-                }
-            }
+            let (_, tod) = self.compute_sun_direction_and_time_of_day(self.current_planet_idx);
+            self.time_of_day = tod;
         }
         self.weather.update(dt);
 
@@ -3395,9 +3188,10 @@ impl GameState {
             fps::MissionType::HiveDestruction => fps::MissionState::new_hive_destruction(40),
             _ => fps::MissionState::new_horde(),
         };
-        // Use this planet's own time of day and weather (each planet has its own conditions)
+        // Time of day from real-time cycle (star + planet rotation); weather from saved conditions
+        let (_, tod) = self.compute_sun_direction_and_time_of_day(Some(planet_idx));
+        self.time_of_day = tod;
         let planet_status = &self.war_state.planets[planet_idx];
-        self.time_of_day = planet_status.time_of_day;
         self.weather = planet_status.weather.clone();
 
         // Reset biome atmosphere for the new planet's biome
@@ -4322,55 +4116,40 @@ impl GameState {
         }
     }
 
-    /// Entrenchment shovel: Ace of Spades–style blocky dig (one block per click) + blocky dirt pile.
-    fn handle_entrenchment_shovel(&mut self) {
+    /// Minecraft Steve scale: block size matches voxel (1m).
+    const SHOVEL_BLOCK_SIZE: f32 = 1.0;
+
+    /// Entrenchment shovel: Ace of Spades–style dig (LMB = remove one block, no auto pile).
+    fn handle_entrenchment_shovel_dig(&mut self) {
         let origin = self.camera.position();
         let direction = self.camera.forward();
-        let max_range = 4.0;
-        const BLOCK_SIZE: f32 = 0.5;
+        let max_range = 6.0;
 
-        // Use raycast_all and take the first *terrain* hit so we dig ground even when aiming through rocks
         let hits = self.physics.raycast_all(origin, direction, max_range);
         let hit = hits
             .into_iter()
             .find(|h| self.chunk_manager.is_terrain_collider(h.collider) && h.distance <= max_range);
 
         if let Some(hit) = hit {
-            // Snap hit to block grid (Ace of Spades style)
-            let snap_x = (hit.point.x / BLOCK_SIZE).floor() * BLOCK_SIZE;
-            let snap_z = (hit.point.z / BLOCK_SIZE).floor() * BLOCK_SIZE;
-            let dig_center = Vec3::new(snap_x, hit.point.y, snap_z);
+            // Snap to block center (same grid as voxel)
+            let dig_center = Self::shovel_snap_to_block_center(hit.point);
 
-            // Remove one block at this cell
+            const MIN_TERRAIN_WORLD_Y: f32 = 24.0;
+            let water_level = self.chunk_manager.water_level().map(|wl| MIN_TERRAIN_WORLD_Y + wl);
             self.chunk_manager.deform_at_blocky(
                 dig_center,
-                BLOCK_SIZE,
+                Self::SHOVEL_BLOCK_SIZE,
                 self.renderer.device(),
                 &mut self.physics,
+                water_level,
             );
 
-            // Dirt pile: one block raised in the cell in front of the dig (toward player)
-            let to_player = self.player.position - hit.point;
-            let to_player_h = Vec3::new(to_player.x, 0.0, to_player.z).normalize_or_zero();
-            let pile_center = dig_center + to_player_h * BLOCK_SIZE;
-            let pile_snap_x = (pile_center.x / BLOCK_SIZE).floor() * BLOCK_SIZE;
-            let pile_snap_z = (pile_center.z / BLOCK_SIZE).floor() * BLOCK_SIZE;
-
-            self.chunk_manager.deform_mound_at_blocky(
-                Vec3::new(pile_snap_x, pile_center.y, pile_snap_z),
-                BLOCK_SIZE,
-                self.renderer.device(),
-                &mut self.physics,
-            );
-
-            // Rebuild affected chunks immediately so the dig is visible this frame
             self.chunk_manager.process_pending_rebuilds(
                 self.renderer.device(),
                 &mut self.physics,
                 8,
             );
 
-            // Visual feedback: dirt/dust impacts
             self.effects.spawn_bullet_impact(hit.point, hit.normal, false);
             for _ in 0..2 {
                 let offset = Vec3::new(
@@ -4390,10 +4169,56 @@ impl GameState {
             }
 
             self.screen_shake.add_trauma(0.035);
-            self.game_messages.info("Block dug — dirt piled!".to_string());
+            self.game_messages.info("Block dug".to_string());
         } else {
-            self.game_messages.info("Aim at the ground to dig (within 4m)".to_string());
+            self.game_messages.info("Aim at terrain to dig (LMB) or place (RMB)".to_string());
         }
+    }
+
+    /// Entrenchment shovel: Ace of Spades–style build (RMB = place one block on the face you're looking at).
+    fn handle_entrenchment_shovel_place(&mut self) {
+        let origin = self.camera.position();
+        let direction = self.camera.forward();
+        let max_range = 6.0;
+
+        let hits = self.physics.raycast_all(origin, direction, max_range);
+        let hit = hits
+            .into_iter()
+            .find(|h| self.chunk_manager.is_terrain_collider(h.collider) && h.distance <= max_range);
+
+        if let Some(hit) = hit {
+            // Place one block in the adjacent voxel (out from the hit face)
+            let place_center = hit.point + hit.normal * Self::SHOVEL_BLOCK_SIZE;
+            let place_snapped = Self::shovel_snap_to_block_center(place_center);
+
+            self.chunk_manager.deform_mound_at_blocky(
+                place_snapped,
+                Self::SHOVEL_BLOCK_SIZE,
+                self.renderer.device(),
+                &mut self.physics,
+            );
+
+            self.chunk_manager.process_pending_rebuilds(
+                self.renderer.device(),
+                &mut self.physics,
+                8,
+            );
+
+            self.screen_shake.add_trauma(0.02);
+            self.game_messages.info("Block placed".to_string());
+        } else {
+            self.game_messages.info("Aim at terrain to dig (LMB) or place (RMB)".to_string());
+        }
+    }
+
+    /// Snap world position to voxel block center (2m grid).
+    fn shovel_snap_to_block_center(p: Vec3) -> Vec3 {
+        let b = Self::SHOVEL_BLOCK_SIZE;
+        Vec3::new(
+            (p.x / b).floor() * b + b * 0.5,
+            (p.y / b).floor() * b + b * 0.5,
+            (p.z / b).floor() * b + b * 0.5,
+        )
     }
 
     fn handle_weapon_fire(&mut self) {
@@ -4401,14 +4226,17 @@ impl GameState {
             return;
         }
 
-        // Entrenching shovel (slot 4): click or hold LMB to dig (hold = larger hole)
+        // Entrenching shovel (slot 4): Ace of Spades — LMB = dig, RMB = place block
         if self.player.is_shovel_equipped() {
             if self.current_planet_idx.is_some() {
                 let dt = self.smoothed_dt;
                 self.shovel_dig_cooldown = (self.shovel_dig_cooldown - dt).max(0.0);
                 if self.input.is_fire_held() && self.shovel_dig_cooldown <= 0.0 {
-                    self.handle_entrenchment_shovel();
+                    self.handle_entrenchment_shovel_dig();
                     self.shovel_dig_cooldown = 0.22; // ~4–5 digs per second while holding
+                }
+                if self.input.is_mouse_pressed(winit::event::MouseButton::Right) {
+                    self.handle_entrenchment_shovel_place();
                 }
             }
             return;
@@ -4556,17 +4384,18 @@ impl GameState {
                 self.check_bug_hits(origin, dir, hit.point, damage, hit_entity);
                 self.check_destructible_hits(hit.point, damage);
 
-                // Terrain destruction: if the hit collider is a terrain chunk, deform it
+                // Terrain destruction: remove voxel blocks where the shot hits (chunks out of terrain)
                 if self.chunk_manager.is_terrain_collider(hit.collider) {
-                    // Weapon-specific crater parameters
-                    let crater_radius = if damage > 40.0 { 2.5 } else if damage > 20.0 { 1.5 } else { 0.8 };
-                    let crater_depth = if damage > 40.0 { 1.5 } else if damage > 20.0 { 0.8 } else { 0.3 };
-                    self.chunk_manager.deform_at(
+                    const VOXEL_BLOCK_SIZE: f32 = 1.0; // match procgen voxel block size (Minecraft Steve)
+                    const MIN_TERRAIN_WORLD_Y: f32 = 24.0; // match procgen baseline for water level
+                    let radius = if damage > 40.0 { VOXEL_BLOCK_SIZE * 1.5 } else if damage > 20.0 { VOXEL_BLOCK_SIZE } else { VOXEL_BLOCK_SIZE * 0.6 };
+                    let water_level = self.chunk_manager.water_level().map(|wl| MIN_TERRAIN_WORLD_Y + wl);
+                    self.chunk_manager.deform_at_blocky(
                         hit.point,
-                        crater_radius,
-                        crater_depth,
+                        radius,
                         self.renderer.device(),
                         &mut self.physics,
+                        water_level,
                     );
                 }
             }
@@ -6388,26 +6217,66 @@ impl GameState {
         }
 
         let cam_pos = self.camera.position();
-        // Reference position: if on a planet, offset bodies relative to planet center
-        let cam_dvec = if let Some(planet_idx) = self.current_planet_idx {
-            let planet_pos = self.current_system.bodies[planet_idx].orbital_position(self.orbital_time);
-            planet_pos + DVec3::new(cam_pos.x as f64, cam_pos.y as f64, cam_pos.z as f64)
-        } else {
-            DVec3::new(cam_pos.x as f64, cam_pos.y as f64, cam_pos.z as f64)
-        };
+
+        // On planet surface: camera is in planet-centered world space. Place sun and moons at the
+        // far plane so they're not clipped (camera far = 1000) and use correct directions.
+        if let Some(planet_idx) = self.current_planet_idx {
+            let body = &self.current_system.bodies[planet_idx];
+            let planet_pos = body.orbital_position(self.orbital_time);
+            let sun_dir = (-planet_pos).normalize();
+            let sun_dir_f = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
+            const FAR_PLANE: f32 = 999.0; // Just inside camera far=1000 so not clipped
+            let star = &self.current_system.star;
+            let sun_pos = cam_pos + sun_dir_f * FAR_PLANE;
+            let sun_radius = 14.0; // ~0.8° angular radius — clearly visible disc
+            instances.push(CelestialBodyInstance {
+                position: sun_pos.into(),
+                radius: sun_radius,
+                color: [star.color.x, star.color.y, star.color.z, 1.0],
+                star_direction: [0.0, 0.0, 0.0, 0.0],
+                atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+            });
+            for (m, moon) in body.moons.iter().enumerate() {
+                if let Some(moon_pos) = body.moon_world_position(m, self.orbital_time) {
+                    let moon_rel = moon_pos - planet_pos;
+                    let moon_rel_f = Vec3::new(moon_rel.x as f32, moon_rel.y as f32, moon_rel.z as f32);
+                    let to_moon = moon_rel_f - cam_pos;
+                    let dist_sq = to_moon.length_squared();
+                    if dist_sq < 1e-6 {
+                        continue;
+                    }
+                    let moon_dir = to_moon.normalize();
+                    let moon_pos_far = cam_pos + moon_dir * FAR_PLANE;
+                    let moon_radius = 4.0; // ~0.23° angular
+                    let moon_to_star = (-moon_pos).normalize();
+                    let mts = Vec3::new(moon_to_star.x as f32, moon_to_star.y as f32, moon_to_star.z as f32);
+                    let moon_cfg = moon.planet.get_biome_config();
+                    let moon_color = moon_cfg.base_color;
+                    instances.push(CelestialBodyInstance {
+                        position: moon_pos_far.into(),
+                        radius: moon_radius,
+                        color: [moon_color.x, moon_color.y, moon_color.z, 0.3],
+                        star_direction: [mts.x, mts.y, mts.z, 0.0],
+                        atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+                    });
+                }
+            }
+            return instances;
+        }
+
+        // Orbit/space view: camera in universe space
+        let cam_dvec = DVec3::new(cam_pos.x as f64, cam_pos.y as f64, cam_pos.z as f64);
 
         // Star
         let star = &self.current_system.star;
-        let star_pos = DVec3::ZERO; // Star is at system center
+        let star_pos = DVec3::ZERO;
         let rel = star_pos - cam_dvec;
         let rel_f = Vec3::new(rel.x as f32, rel.y as f32, rel.z as f32);
-
-        // Only render if within reasonable distance
         if rel_f.length() < 200000.0 {
             instances.push(CelestialBodyInstance {
                 position: rel_f.into(),
                 radius: star.radius,
-                color: [star.color.x, star.color.y, star.color.z, 1.0], // w > 0.5 = emissive
+                color: [star.color.x, star.color.y, star.color.z, 1.0],
                 star_direction: [0.0, 0.0, 0.0, 0.0],
                 atmosphere_color: [0.0, 0.0, 0.0, 0.0],
             });
@@ -6592,22 +6461,82 @@ impl GameState {
         instances
     }
 
-    fn sky_weather_params(&self) -> (Vec3, f32, f32, f32) {
-        // Sun position: smooth arc across the sky
-        // time_of_day: 0.0 = dawn (east), 0.25 = noon (overhead), 0.5 = dusk (west), 0.75 = midnight
+    /// Real-time sun direction and time-of-day from star position and planet rotation.
+    /// When on a planet: star is at system origin; planet position and rotation give unique day/night per system/planet.
+    /// When in space: uses target planet if in ship, else procedural fallback from current time_of_day.
+    fn compute_sun_direction_and_time_of_day(&self, planet_idx: Option<usize>) -> (Vec3, f32) {
+        let tau_f64 = std::f64::consts::TAU;
+        let tau_f32 = std::f32::consts::TAU;
+
+        if let Some(idx) = planet_idx {
+            if let Some(body) = self.current_system.bodies.get(idx) {
+                let planet = &body.planet;
+                // Star at origin; direction from planet to star (sun)
+                let planet_pos = body.orbital_position(self.orbital_time);
+                let to_star = Vec3::new(
+                    -planet_pos.x as f32,
+                    -planet_pos.y as f32,
+                    -planet_pos.z as f32,
+                );
+                let len = to_star.length();
+                if len > 1e-6 {
+                    let to_star_n = to_star / len;
+                    // Planet rotation: axis = world Y (spin), period = rotation_period_sec
+                    let rotation_phase = (self.universe_time_sec / planet.rotation_period_sec as f64) * tau_f64
+                        + planet.rotation_phase_0 as f64;
+                    let c = rotation_phase.cos() as f32;
+                    let s = rotation_phase.sin() as f32;
+                    // R_y(phase) * to_star: rotate to_star around Y (sun moves across sky as planet spins)
+                    let sun_dir = Vec3::new(
+                        to_star_n.x * c + to_star_n.z * s,
+                        to_star_n.y,
+                        -to_star_n.x * s + to_star_n.z * c,
+                    );
+                    let time_of_day = Self::time_of_day_from_sun_direction(sun_dir);
+                    return (sun_dir, time_of_day);
+                }
+            }
+        }
+
+        // In space or no body: use target planet when in ship for consistency
+        if self.phase == GamePhase::InShip {
+            let target_idx = self.ship_state.as_ref()
+                .map(|s| s.target_planet_idx)
+                .unwrap_or(0)
+                .min(self.current_system.bodies.len().saturating_sub(1));
+            let (sun_dir, tod) = self.compute_sun_direction_and_time_of_day(Some(target_idx));
+            return (sun_dir, tod);
+        }
+
+        // Fallback: procedural arc from stored time_of_day (main menu, etc.)
         let t = self.time_of_day;
-        let azimuth = t * std::f32::consts::TAU; // full circle
-
-        // Sun elevation: peaks at noon (t=0.25), below horizon at night (t=0.75)
-        // Use a sine curve so night is actually dark (sun below horizon)
-        let elev_raw = (t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2).sin();
+        let azimuth = t * tau_f32;
+        let elev_raw = (t * tau_f32 - std::f32::consts::FRAC_PI_2).sin();
         let elevation = elev_raw * std::f32::consts::FRAC_PI_2 * 0.92;
+        let sun_dir = Vec3::new(
+            azimuth.cos() * elevation.cos(),
+            elevation.sin(),
+            azimuth.sin() * elevation.cos(),
+        );
+        (sun_dir, self.time_of_day)
+    }
 
-        let sun_x = azimuth.cos() * elevation.cos();
-        let sun_y = elevation.sin();
-        let sun_z = azimuth.sin() * elevation.cos();
-        let sun_dir = Vec3::new(sun_x, sun_y, sun_z);
+    /// Derive time_of_day (0=dawn, 0.25=noon, 0.5=dusk, 0.75=night) from sun direction in world space.
+    fn time_of_day_from_sun_direction(sun_dir: Vec3) -> f32 {
+        let elevation = sun_dir.y; // sin(elevation)
+        let azimuth = sun_dir.x.atan2(sun_dir.z); // angle in XZ
+        if elevation < -0.15 {
+            // Below horizon: night (0.75) with smooth transition
+            let blend = (elevation + 0.15) / -0.25;
+            (0.5 + 0.25 * blend).max(0.65).min(0.85)
+        } else {
+            // Dawn = 0 when sun east (+X): azimuth π/2 -> (π/2 - π/2)/(2π) = 0
+            (azimuth / (2.0 * std::f32::consts::PI) - 0.25).rem_euclid(1.0)
+        }
+    }
 
+    fn sky_weather_params(&self) -> (Vec3, f32, f32, f32) {
+        let (sun_dir, _) = self.compute_sun_direction_and_time_of_day(self.current_planet_idx);
         (sun_dir, self.weather.cloud_density, self.weather.dust, self.weather.fog_density)
     }
 
@@ -6927,259 +6856,6 @@ impl GameState {
 
     fn render(&mut self) -> Result<()> {
         render::run(self)
-    }
-
-
-    fn handle_window_event(&mut self, event: WindowEvent) -> bool {
-        match event {
-            WindowEvent::CloseRequested => {
-                self.running = false;
-                true
-            }
-            WindowEvent::Resized(size) => {
-                self.renderer.resize(size);
-                self.camera.set_aspect(size.width, size.height);
-                false
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
-                    self.input.process_keyboard(key, event.state);
-
-                    if key == KeyCode::Escape && event.state.is_pressed() {
-                        if self.phase == GamePhase::Paused {
-                            // Resume or act on selection: Escape = Resume
-                            if self.pause_menu_selected == 0 {
-                                if let Some(prev) = self.previous_phase.take() {
-                                    self.phase = prev;
-                                    let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::Locked)
-                                        .or_else(|_| self.renderer.window.set_cursor_grab(CursorGrabMode::Confined));
-                                    self.renderer.window.set_cursor_visible(false);
-                                    self.input.set_cursor_locked(true);
-                                }
-                            }
-                        } else if self.phase == GamePhase::Playing || self.phase == GamePhase::InShip {
-                            // Open pause menu
-                            self.previous_phase = Some(self.phase);
-                            self.phase = GamePhase::Paused;
-                            self.pause_menu_selected = 0;
-                            let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::None);
-                            self.renderer.window.set_cursor_visible(true);
-                            self.input.set_cursor_locked(false);
-                        } else {
-                            let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::None);
-                            self.renderer.window.set_cursor_visible(true);
-                            self.input.set_cursor_locked(false);
-                        }
-                    }
-
-                    // Pause menu navigation and confirm
-                    if self.phase == GamePhase::Paused && event.state.is_pressed() {
-                        match key {
-                            KeyCode::ArrowUp | KeyCode::KeyW => {
-                                self.pause_menu_selected = self.pause_menu_selected.saturating_sub(1);
-                            }
-                            KeyCode::ArrowDown | KeyCode::KeyS => {
-                                self.pause_menu_selected = (self.pause_menu_selected + 1).min(1);
-                            }
-                            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
-                                if self.pause_menu_selected == 0 {
-                                    if let Some(prev) = self.previous_phase.take() {
-                                        self.phase = prev;
-                                        let _ = self.renderer.window.set_cursor_grab(CursorGrabMode::Locked)
-                                            .or_else(|_| self.renderer.window.set_cursor_grab(CursorGrabMode::Confined));
-                                        self.renderer.window.set_cursor_visible(false);
-                                        self.input.set_cursor_locked(true);
-                                    }
-                                } else {
-                                    self.transition_to_main_menu();
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // Debug controls
-                    if key == KeyCode::F1 && event.state.is_pressed() {
-                        // Spawn debug bugs
-                        for _ in 0..10 {
-                            let angle = rand::random::<f32>() * std::f32::consts::TAU;
-                            let dist = 15.0 + rand::random::<f32>() * 20.0;
-                            let pos = self.player.position + Vec3::new(angle.cos() * dist, 0.5, angle.sin() * dist);
-                            
-                            let (bug_type, variant) = self.random_bug_type();
-                            let bug = Bug::new_with_variant(bug_type, variant);
-                            let scale = bug_type.scale();
-                            let body_handle = self.physics.add_kinematic_body(pos);
-                            let collider_handle = self.physics.add_capsule_collider(body_handle, scale.y * 0.5, scale.x * 0.5);
-                            
-                            self.world.spawn((
-                                Transform { position: pos, rotation: Quat::IDENTITY, scale },
-                                Velocity::default(),
-                                Health::new(bug.effective_health()),
-                                bug,
-                                PhysicsBug {
-                                    body_handle: Some(body_handle),
-                                    collider_handle: Some(collider_handle),
-                                    ..Default::default()
-                                },
-                                engine_core::AIComponent::new(85.0, 2.5, 1.0),  // Extermination: large aggro = constant pressure
-                            ));
-                        }
-                        #[cfg(debug_assertions)]
-                        self.game_messages.info("Spawned 10 debug bugs!");
-                    }
-
-                    if key == KeyCode::F2 && event.state.is_pressed() {
-                        self.player.heal(50.0);
-                        self.player.add_armor(25.0);
-                        #[cfg(debug_assertions)]
-                        self.game_messages.info("Debug heal applied!");
-                    }
-
-                    // ===== F3: Toggle debug menu =====
-                    if key == KeyCode::F3 && event.state.is_pressed() {
-                        self.debug.menu_open = !self.debug.menu_open;
-                        if self.debug.menu_open {
-                            #[cfg(debug_assertions)]
-                            self.game_messages.info("[DEBUG] Debug menu opened (Arrow keys + Enter)");
-                        }
-                    }
-
-                    // ===== Debug menu navigation (when open) =====
-                    if self.debug.menu_open && event.state.is_pressed() {
-                        match key {
-                            KeyCode::ArrowUp => {
-                                if self.debug.selected > 0 {
-                                    self.debug.selected -= 1;
-                                } else {
-                                    self.debug.selected = self.debug.menu_item_count() - 1;
-                                }
-                            }
-                            KeyCode::ArrowDown => {
-                                self.debug.selected = (self.debug.selected + 1) % self.debug.menu_item_count();
-                            }
-                            KeyCode::Enter | KeyCode::NumpadEnter => {
-                                self.debug.toggle_selected();
-                                // Show feedback for the toggled item
-                                let items = self.debug.menu_items();
-                                if let Some((name, val)) = items.get(self.debug.selected) {
-                                    #[cfg(debug_assertions)]
-                                    {
-                                        if name.starts_with("--") {
-                                            self.game_messages.info(format!("[DEBUG] {}", name.trim_matches('-').trim()));
-                                        } else {
-                                            self.game_messages.info(format!("[DEBUG] {} = {}", name, if *val { "ON" } else { "OFF" }));
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // ===== R: Cycle to next planet (only in noclip/space, not FPS mode where R = reload) =====
-                    // Blocked during ship/drop phases
-                    if key == KeyCode::KeyR && event.state.is_pressed() && !self.galaxy_map_open
-                        && self.phase != GamePhase::InShip && self.phase != GamePhase::ApproachPlanet && self.phase != GamePhase::DropSequence
-                        && (self.debug.noclip || self.current_planet_idx.is_none())
-                    {
-                        self.regenerate_planet();
-                    }
-
-                    // ===== M: Toggle galaxy map =====
-                    // Blocked during drop sequence
-                    if key == KeyCode::KeyM && event.state.is_pressed()
-                        && self.phase != GamePhase::DropSequence && self.phase != GamePhase::InShip && self.phase != GamePhase::ApproachPlanet
-                    {
-                        self.galaxy_map_open = !self.galaxy_map_open;
-                        if self.galaxy_map_open {
-                            self.galaxy_map_selected = self.current_system_idx;
-                        }
-                    }
-
-                    // ===== Galaxy map controls =====
-                    if self.galaxy_map_open && event.state.is_pressed() {
-                        let num_systems = self.universe.systems.len();
-                        match key {
-                            KeyCode::ArrowRight | KeyCode::ArrowDown => {
-                                self.galaxy_map_selected = (self.galaxy_map_selected + 1) % num_systems;
-                            }
-                            KeyCode::ArrowLeft | KeyCode::ArrowUp => {
-                                self.galaxy_map_selected = if self.galaxy_map_selected == 0 {
-                                    num_systems - 1
-                                } else {
-                                    self.galaxy_map_selected - 1
-                                };
-                            }
-                            KeyCode::Enter | KeyCode::NumpadEnter => {
-                                // Warp is only allowed when in space (not on a planet)
-                                if self.current_planet_idx.is_some() {
-                                    self.game_messages.warning("Must be in orbit to initiate warp drive!".to_string());
-                                } else if self.galaxy_map_selected != self.current_system_idx {
-                                    let target = self.galaxy_map_selected;
-                                    let target_name = self.universe.systems[target].name.clone();
-                                    self.game_messages.warning(format!("Initiating warp to {}...", target_name));
-                                    self.warp_sequence = Some(WarpSequence::new(target));
-                                    self.galaxy_map_open = false;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                false
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.input.process_mouse_button(button, state);
-
-                // Main menu: keep cursor visible for clicking Play/Quit
-                if self.phase == GamePhase::MainMenu {
-                    return false;
-                }
-                if state.is_pressed() && !self.input.is_cursor_locked() {
-                    let _ = self.renderer.window
-                        .set_cursor_grab(CursorGrabMode::Locked)
-                        .or_else(|_| self.renderer.window.set_cursor_grab(CursorGrabMode::Confined));
-                    self.renderer.window.set_cursor_visible(false);
-                    self.input.set_cursor_locked(true);
-                }
-                false
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.input.process_cursor_position((position.x, position.y));
-                false
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                        if y > 0.0 { self.input.set_scroll_up(); }
-                        else if y < 0.0 { self.input.set_scroll_down(); }
-                    }
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                        if pos.y > 0.0 { self.input.set_scroll_up(); }
-                        else if pos.y < 0.0 { self.input.set_scroll_down(); }
-                    }
-                }
-                false
-            }
-            WindowEvent::RedrawRequested => {
-                self.update();
-                if let Err(e) = self.render() {
-                    log::error!("Render error: {}", e);
-                }
-                self.renderer.window.request_redraw();
-                false
-            }
-            _ => false,
-        }
-    }
-
-    fn handle_device_event(&mut self, event: DeviceEvent) {
-        if let DeviceEvent::MouseMotion { delta } = event {
-            if self.input.is_cursor_locked() {
-                self.input.process_mouse_motion(delta);
-            }
-        }
     }
 }
 

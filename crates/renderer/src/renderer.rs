@@ -83,6 +83,8 @@ pub struct SkyUniform {
     pub sky_color_horizon: [f32; 4],
     pub ground_color: [f32; 4],      // rgb = ground, w = haze amount
     pub params: [f32; 4],            // x = time, y = cloud_density, z = dust, w = planet_type
+    /// x = 1.0 to skip procedural sun/moon (use physical celestial spheres instead)
+    pub skip_procedural_sun_moon: [f32; 4],
 }
 
 impl Default for SkyUniform {
@@ -94,6 +96,7 @@ impl Default for SkyUniform {
             sky_color_horizon: [0.6, 0.65, 0.75, 1.0],
             ground_color: [0.4, 0.35, 0.3, 0.3],
             params: [0.0, 0.3, 0.1, 0.0],
+            skip_procedural_sun_moon: [0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -739,7 +742,14 @@ impl Renderer {
         let dist = 120.0;
         let light_eye = cam + sun * dist;
         let light_target = cam;
-        let up = if sun.y.abs() > 0.99 { glam::Vec3::Z } else { glam::Vec3::Y };
+        // Stable up: avoid flip when sun is near vertical (reduces shadow map jitter when sun/moon behind terrain).
+        let up = if sun.y > 0.98 {
+            glam::Vec3::NEG_Z
+        } else if sun.y < -0.98 {
+            glam::Vec3::Z
+        } else {
+            glam::Vec3::Y
+        };
         let view = glam::Mat4::look_at_rh(light_eye, light_target, up);
         let half = 70.0f32;
         let proj = glam::Mat4::orthographic_rh(-half, half, -half, half, 10.0, 280.0);
@@ -1255,6 +1265,7 @@ impl Renderer {
 
     /// Update terrain uniform (sun, fog, biome colors, time, planet radius, chunk_size, deformation, snow).
     /// Call before render_terrain. Deform origin is world (x,z) center of the deformation texture.
+    /// `detail_scale`: higher = finer procedural detail (e.g. 2.7 for Earth).
     pub fn update_terrain(
         &mut self,
         time: f32,
@@ -1263,6 +1274,7 @@ impl Renderer {
         biome_colors: [[f32; 4]; 4],
         planet_radius: f32,
         chunk_size: f32,
+        detail_scale: f32,
         deform_origin_x: f32,
         deform_origin_z: f32,
         deform_enabled: bool,
@@ -1270,7 +1282,7 @@ impl Renderer {
     ) {
         let mut uniform = TerrainUniform::default();
         uniform.biome_params[0] = chunk_size;    // x = chunk_size (for edge blending)
-        uniform.biome_params[1] = 2.0;           // y = detail_scale
+        uniform.biome_params[1] = detail_scale;  // y = detail_scale (higher = finer procedural detail)
         uniform.biome_params[2] = time;           // z = time
         uniform.biome_params[3] = planet_radius;  // w = planet radius for curvature
         uniform.sun_direction = sun_direction;
@@ -1281,6 +1293,7 @@ impl Renderer {
         uniform.deform_params[2] = DEFORM_HALF_SIZE;
         uniform.deform_params[3] = if deform_enabled { 1.0 } else { 0.0 };
         uniform.snow_params[0] = if snow_enabled { 1.0 } else { 0.0 };
+        uniform.snow_params[1] = 1.0; // voxel flat color: use vertex (block/biome) color as albedo
         self.queue
             .write_buffer(&self.terrain_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -1342,6 +1355,7 @@ impl Renderer {
     /// `atmo_height`: atmosphere thickness above surface.
     /// `planet_surface_color`: average biome color (orbit, drop, surface — single source).
     /// `atmosphere_color`: planet atmosphere tint for zenith/horizon (same in orbit, drop, surface).
+    /// `skip_procedural_sun_moon`: if true, sky shader does not draw sun/moon discs (use physical celestial spheres).
     pub fn update_sky(
         &mut self,
         time_of_day: f32,
@@ -1353,6 +1367,7 @@ impl Renderer {
         atmo_height: f32,
         planet_surface_color: [f32; 3],
         atmosphere_color: [f32; 3],
+        skip_procedural_sun_moon: bool,
     ) {
         let t = time_of_day;
 
@@ -1462,6 +1477,7 @@ impl Renderer {
         u.params[1] = cloud_density;
         u.params[2] = dust_amount;
         u.params[3] = planet_type;
+        u.skip_procedural_sun_moon = [if skip_procedural_sun_moon { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
 
         self.queue
             .write_buffer(&self.sky_buffer, 0, bytemuck::cast_slice(&[u]));

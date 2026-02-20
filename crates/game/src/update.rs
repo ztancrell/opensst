@@ -59,8 +59,10 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
     // Player movement (FPS walking or noclip based on debug settings)
     state.handle_player_input(dt);
 
-    // Advance orbital time (planets orbit)
-    state.orbital_time += dt as f64 * 0.1; // slow orbit
+    // Advance orbital time (planets orbit) and universe time (day/night rotation)
+    state.orbital_time += dt as f64 * 0.1;
+    let time_scale = state.debug.time_scale;
+    state.universe_time_sec += dt as f64 * time_scale as f64;
 
     // Update universe position based on camera
     if let Some(planet_idx) = state.current_planet_idx {
@@ -109,18 +111,19 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
     }
 
     // Earth settlement: citizen AI (schedule + time of day + weather)
-    if state.planet.name == "Earth" && state.settlement_center.is_some() && state.current_planet_idx.is_some() {
-        let center = state.settlement_center.unwrap();
-        let waypoints = state.earth_waypoints.as_deref().unwrap_or(&[]);
-        update_citizens(
-            &mut state.world,
-            state.time_of_day,
-            &state.weather,
-            center,
-            waypoints,
-            dt,
-            |x, z| state.chunk_manager.sample_height(x, z),
-        );
+    if state.planet.name == "Earth" && state.current_planet_idx.is_some() {
+        if let Some(center) = state.settlement_center {
+            let waypoints = state.earth_waypoints.as_deref().unwrap_or(&[]);
+            update_citizens(
+                &mut state.world,
+                state.time_of_day,
+                &state.weather,
+                center,
+                waypoints,
+                dt,
+                |x, z| state.chunk_manager.sample_height(x, z),
+            );
+        }
     }
 
     // Dialogue: handle open state (number keys = choices, Escape = close)
@@ -996,7 +999,7 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
             ));
             // Spawn green smoke at the LZ
             state.lz_smoke = Some(SmokeCloud::new(Vec3::new(lz_x, lz_ground, lz_z)));
-            state.game_messages.warning("FLEET COM: Copy that, retrieval boat launching from corvette. ETA 30 seconds.".to_string());
+            state.game_messages.warning("FLEET COM: Copy that, DR-8 Skyhook launching from corvette. ETA 30 seconds.".to_string());
             state.game_messages.info("\"Come on you apes, get to the LZ!\"".to_string());
             state.game_messages.info("Get to the [LZ] marker and hold position!".to_string());
         }
@@ -1284,7 +1287,7 @@ pub fn gameplay(state: &mut GameState, dt: f32) {
         }
         state.shell_casings.drain(0..n_remove);
     }
-    const MAX_GROUNDED_CASINGS: usize = 350;
+    const MAX_GROUNDED_CASINGS: usize = 1500;
     if state.grounded_shell_casings.len() > MAX_GROUNDED_CASINGS {
         let n_remove = state.grounded_shell_casings.len() - MAX_GROUNDED_CASINGS;
         for i in 0..n_remove {

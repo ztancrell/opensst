@@ -185,6 +185,20 @@ impl PhysicsWorld {
         self.collider_set.insert_with_parent(collider, body_handle, &mut self.rigid_body_set)
     }
 
+    /// Ball collider for shell casings: bounces on terrain (restitution), slides a bit (friction).
+    fn add_shell_casing_collider(
+        &mut self,
+        body_handle: RigidBodyHandle,
+        radius: f32,
+    ) -> ColliderHandle {
+        let collider = ColliderBuilder::ball(radius)
+            .collision_groups(debris_collision_groups())
+            .restitution(0.35)
+            .friction(0.4)
+            .build();
+        self.collider_set.insert_with_parent(collider, body_handle, &mut self.rigid_body_set)
+    }
+
     /// Add a dynamic body for an ejected shell casing (position, rotation, velocities) and a small debris sphere.
     /// Returns (body_handle, collider_handle). Use for persistent, physics-driven shell casings.
     pub fn add_shell_casing_body(
@@ -209,7 +223,7 @@ impl PhysicsWorld {
             .angvel(vector![ang_vel.x, ang_vel.y, ang_vel.z])
             .build();
         let body_handle = self.rigid_body_set.insert(rigid_body);
-        let collider_handle = self.add_debris_sphere_collider(body_handle, radius);
+        let collider_handle = self.add_shell_casing_collider(body_handle, radius);
         (body_handle, collider_handle)
     }
 

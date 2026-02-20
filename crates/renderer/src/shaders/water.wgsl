@@ -149,5 +149,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
     color = pow(color, vec3<f32>(1.0 / 2.2));
 
-    return vec4<f32>(color, 0.95); // Slightly more opaque so water is always visible
+    // Minecraft-style transparency: voxel water passes alpha in vertex color (0.4–0.7); smooth water uses 0.95
+    let alpha = select(0.95, in.water_color.a, in.water_color.a >= 0.4 && in.water_color.a <= 0.85);
+    return vec4<f32>(color, alpha);
 }

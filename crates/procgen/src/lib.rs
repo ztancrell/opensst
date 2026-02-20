@@ -8,6 +8,7 @@ pub mod star_system;
 pub mod terrain;
 pub mod textures;
 pub mod universe;
+pub mod voxel;
 
 pub use biome::*;
 pub use bug_mesh::*;
@@ -17,3 +18,4 @@ pub use star_system::*;
 pub use terrain::*;
 pub use textures::*;
 pub use universe::*;
+pub use voxel::*;

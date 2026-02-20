@@ -937,7 +937,7 @@ pub fn build(state: &GameState, sw: f32, sh: f32) -> OverlayTextBuilder {
 
         let ammo_x = cx + 30.0;
         if state.player.is_shovel_equipped() {
-            let shovel_hint = "Hold LMB to dig (larger hole)".to_string();
+            let shovel_hint = "LMB = dig  |  RMB = place block".to_string();
             tb.add_text_with_bg(ammo_x, hbar_y - 4.0, &shovel_hint, 2.5, [0.6, 0.5, 0.3, 1.0], [0.0, 0.0, 0.0, 0.5]);
             tb.add_text(ammo_x, hbar_y + 22.0, "Entrenching Shovel", 1.5, gray);
         } else {

@@ -815,3 +815,26 @@ impl GameMessages {
         self.messages.retain(|m| m.time_remaining > 0.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DebugSettings;
+
+    #[test]
+    fn debug_settings_menu_item_count() {
+        let d = DebugSettings::new();
+        assert_eq!(d.menu_item_count(), 15);
+        assert_eq!(d.menu_items().len(), 15);
+    }
+
+    #[test]
+    fn debug_settings_toggle_selected() {
+        let mut d = DebugSettings::new();
+        assert!(!d.noclip);
+        d.selected = 1;
+        d.toggle_selected();
+        assert!(d.noclip);
+        d.toggle_selected();
+        assert!(!d.noclip);
+    }
+}

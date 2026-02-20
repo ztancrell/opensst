@@ -1,5 +1,6 @@
-//! Federation fleet: corvettes, destroyers, tac fighter launch/RTB points.
-//! Shared orbit params so tac fighters spawn from and return to corvettes.
+//! Federation fleet: Corvette Transports (Rodger Young type), destroyers, TAC launch/RTB.
+//! Orbit params shared with render so ships in sky match tac fighter spawn/RTB positions.
+//! Ref: https://starshiptroopers.fandom.com/wiki/Rodger_Young_Type
 
 use glam::Vec3;
 

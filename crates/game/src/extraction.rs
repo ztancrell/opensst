@@ -1,9 +1,10 @@
-//! Extraction dropship system — MI Retrieval Boat pickup + return to the Roger Young.
+//! Extraction dropship system — DR-8 Skyhook retrieval boat + return to the Roger Young.
 //!
 //! When the trooper calls for extraction the Federation Corvette dispatches a
-//! Retrieval Boat (heavy dropship).  The boat flies in, lands, picks up the
-//! player, then flies all the way back to the Roger Young in orbit — with the
-//! player aboard watching the whole ride from inside the hold.
+//! DR-8 Skyhook: a small Fleet shuttle/retrieval boat used to transport personnel
+//! and rescue Mobile Infantry. It descends from orbit, lands, opens the rear ramp,
+//! then climbs back to the Roger Young with the player aboard.
+//! Ref: <https://starshiptroopers.fandom.com/wiki/DR-8_Skyhook>
 
 use glam::Vec3;
 use rand::Rng;
@@ -32,7 +33,7 @@ pub enum ExtractionPhase {
 
 // ── Main struct ─────────────────────────────────────────────────────────
 
-/// A Retrieval Boat performing player extraction.
+/// DR-8 Skyhook retrieval boat performing player extraction (Fleet shuttle, sublight thrusters).
 pub struct ExtractionDropship {
     // ── Spatial ──
     pub position: Vec3,
@@ -432,8 +433,7 @@ impl ExtractionDropship {
 
     /// Camera position for the player inside the boat during the ride back.
     pub fn aboard_camera_pos(&self) -> Vec3 {
-        // Seat position: center of the hold, slightly back from center, eye height
-        self.position + self.ship_forward() * -2.0 + Vec3::Y * 0.8
+        self.position + self.ship_forward() * -1.2 + Vec3::Y * 0.6
     }
 
     /// Camera look direction during the ride back (changes per phase).
@@ -447,12 +447,10 @@ impl ExtractionDropship {
         }
     }
 
-    /// Third-person chase camera position: behind and above the retrieval boat.
-    /// Slower, cinematic view of climb to corvette (Roger Young in sky).
+    /// Third-person chase camera position: behind and above the DR-8.
     pub fn extraction_chase_camera_pos(&self) -> Vec3 {
         let fwd = self.ship_forward();
-        // Farther back, higher — slower feel, Roger Young visible in frame
-        self.position - fwd * 50.0 + Vec3::Y * 18.0
+        self.position - fwd * 28.0 + Vec3::Y * 12.0
     }
 
     /// Chase cam always looks at Roger Young (corvettes higher — swap scene to destroyer).
@@ -490,7 +488,7 @@ impl ExtractionDropship {
     }
 
     pub fn ramp_position(&self) -> Vec3 {
-        self.position + self.approach_dir * 8.0 - Vec3::Y * (HOVER_ALTITUDE - 0.5)
+        self.position + self.approach_dir * 5.0 - Vec3::Y * (HOVER_ALTITUDE - 0.5)
     }
 
     pub fn ship_forward(&self) -> Vec3 {
@@ -505,11 +503,11 @@ impl ExtractionDropship {
     // ── Door gunner helpers ─────────────────────────────────────────────
 
     pub fn gunner_left_pos(&self) -> Vec3 {
-        self.position + self.ship_right() * -5.5 + self.approach_dir * 2.0 - Vec3::Y * 0.5
+        self.position + self.ship_right() * -2.8 + self.approach_dir * 1.2 - Vec3::Y * 0.4
     }
 
     pub fn gunner_right_pos(&self) -> Vec3 {
-        self.position + self.ship_right() * 5.5 + self.approach_dir * 2.0 - Vec3::Y * 0.5
+        self.position + self.ship_right() * 2.8 + self.approach_dir * 1.2 - Vec3::Y * 0.4
     }
 
     pub fn gunners_active(&self) -> bool {
@@ -554,8 +552,9 @@ impl ExtractionDropship {
 
     // ── Physics / collision helpers ──────────────────────────────────────
 
+    /// Hull half-extents for collision (DR-8 Skyhook: small landing boat).
     pub fn hull_half_extents(&self) -> Vec3 {
-        Vec3::new(6.0, 2.0, 8.0)
+        Vec3::new(3.5, 1.2, 5.0)
     }
 
     pub fn needs_collider(&self) -> bool {
@@ -568,7 +567,7 @@ impl ExtractionDropship {
     // ── Boarding camera interpolation ────────────────────────────────────
 
     pub fn boarding_interior_pos(&self) -> Vec3 {
-        self.position + self.approach_dir * 2.0 + Vec3::Y * 0.5
+        self.position + self.approach_dir * 1.2 + Vec3::Y * 0.4
     }
 
     pub fn boarding_camera_pos(&self, start: Vec3) -> Vec3 {

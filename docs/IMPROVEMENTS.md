@@ -11,7 +11,7 @@ A broad list of things that could be improved. Use as a backlog; pick by priorit
 - [ ] **Split `update.rs`** (1,313 lines) – Break into submodules by system: e.g. `update/player.rs`, `update/combat.rs`, `update/stratagems.rs`, `update/environment.rs`, `update/physics_cleanup.rs`.
 - [ ] **Split `overlay.rs`** (1,070 lines) – Extract HUD, galaxy map, war table UI, drop pod HUD, kill feed, debug overlay into separate functions or submodules.
 - [ ] **Extract init from `GameState::new`** – Universe/chunk/player/spawner init is a huge async block; split into smaller constructors or `init_*` helpers.
-- [ ] **Dedicate event-handling module** – Move `handle_window_event` and key/mouse handling out of `main.rs` into e.g. `events.rs` or `input_handling.rs`.
+- [x] **Dedicate event-handling module** – Move `handle_window_event` and key/mouse handling out of `main.rs` into e.g. `events.rs` or `input_handling.rs`. (Done: `events.rs` with `impl GameState` for window/device events.)
 - [ ] **Reduce `renderer.rs` size** (1,461 lines) – Split pipeline creation, sky, celestial, overlay rendering into submodules or helper files.
 
 ---

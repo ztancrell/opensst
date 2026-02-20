@@ -20,6 +20,7 @@ struct SkyUniform {
     sky_color_horizon: vec4<f32>, // rgb = horizon color, w = atmo_height
     ground_color: vec4<f32>,      // rgb = planet surface color, w = haze amount
     params: vec4<f32>,            // x = time, y = cloud_density, z = dust_amount, w = planet_type
+    skip_procedural_sun_moon: vec4<f32>, // x = 1.0 to skip procedural sun/moon (use physical spheres)
 };
 
 @group(0) @binding(0)
@@ -485,35 +486,50 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ===== BLEND ATMOSPHERE <-> SPACE =====
     var sky_color = mix(atmo_color, space_color, space_blend);
 
-    // ===== SUN (realistic disk, corona, limb darkening) =====
-    let sun_disk_size = sky.sun_color.w * 0.018; // Slightly larger for visibility
-    let sun_disk = smoothstep(1.0 - sun_disk_size, 1.0 - sun_disk_size * 0.25, sun_dot);
+    // ===== SUN (realistic disk, corona, limb darkening) — skip when using physical sun =====
+    if (sky.skip_procedural_sun_moon.x < 0.5) {
+        let sun_disk_size = sky.sun_color.w * 0.018; // Slightly larger for visibility
+        let sun_disk = smoothstep(1.0 - sun_disk_size, 1.0 - sun_disk_size * 0.25, sun_dot);
 
-    // Limb darkening: sun is brighter at center (realistic)
-    let limb_darken = 0.4 + 0.6 * pow(max(sun_dot, 0.0), 0.5);
-    let sun_core_color = vec3<f32>(1.0, 1.0, 0.98);
-    let sun_limb_color = vec3<f32>(0.95, 0.92, 0.85);
+        // Limb darkening: sun is brighter at center (realistic)
+        let limb_darken = 0.4 + 0.6 * pow(max(sun_dot, 0.0), 0.5);
+        let sun_core_color = vec3<f32>(1.0, 1.0, 0.98);
+        let sun_limb_color = vec3<f32>(0.95, 0.92, 0.85);
 
-    let corona_noise = fbm(view_dir * 20.0 + sun_dir * 5.0, 3);
-    let corona_atmo = pow(max(sun_dot, 0.0), 14.0) * (0.85 + corona_noise * 0.5) * 0.18 * (1.0 - space_blend);
-    let corona_space = pow(max(sun_dot, 0.0), 70.0) * 0.45 * space_blend; // Sharper in space
-    let corona = corona_atmo + corona_space;
+        let corona_noise = fbm(view_dir * 20.0 + sun_dir * 5.0, 3);
+        let corona_atmo = pow(max(sun_dot, 0.0), 14.0) * (0.85 + corona_noise * 0.5) * 0.18 * (1.0 - space_blend);
+        let corona_space = pow(max(sun_dot, 0.0), 70.0) * 0.45 * space_blend; // Sharper in space
+        let corona = corona_atmo + corona_space;
 
-    let glow_power = mix(2.8, 28.0, space_blend); // Slightly softer glow for more realistic sun
-    let glow_atmo = mix(1.0, 0.08, space_blend);
-    let sun_glow = pow(max(sun_dot, 0.0), glow_power) * mix(0.85, 0.15, day_factor) * glow_atmo;
+        let glow_power = mix(2.8, 28.0, space_blend); // Slightly softer glow for more realistic sun
+        let glow_atmo = mix(1.0, 0.08, space_blend);
+        let sun_glow = pow(max(sun_dot, 0.0), glow_power) * mix(0.85, 0.15, day_factor) * glow_atmo;
 
-    let sun_vis = mix(sun_intensity, 1.0, space_blend);
+        let sun_vis = mix(sun_intensity, 1.0, space_blend);
 
-    let disk_brightness = mix(4.0, 8.0, space_blend); // Brighter, more visible sun
-    let sun_disk_color = mix(sun_limb_color, sun_core_color, limb_darken);
-    sky_color += sun_disk_color * sun_disk * disk_brightness * sun_vis;
-    sky_color += sky.sun_color.rgb * (sun_glow + corona) * sun_vis;
+        let disk_brightness = mix(4.0, 8.0, space_blend); // Brighter, more visible sun
+        let sun_disk_color = mix(sun_limb_color, sun_core_color, limb_darken);
+        sky_color += sun_disk_color * sun_disk * disk_brightness * sun_vis;
+        sky_color += sky.sun_color.rgb * (sun_glow + corona) * sun_vis;
 
-    // Lens flare (stronger at dawn/dusk)
-    if (sun_dot > 0.88 && space_blend < 0.75) {
-        let flare = pow(max(sun_dot - 0.88, 0.0) * 8.33, 2.5) * (0.12 + golden_hour * 0.15) * (1.0 - space_blend);
-        sky_color += sky.sun_color.rgb * flare * sun_vis;
+        // Lens flare (stronger at dawn/dusk)
+        if (sun_dot > 0.88 && space_blend < 0.75) {
+            let flare = pow(max(sun_dot - 0.88, 0.0) * 8.33, 2.5) * (0.12 + golden_hour * 0.15) * (1.0 - space_blend);
+            sky_color += sky.sun_color.rgb * flare * sun_vis;
+        }
+    } else {
+        // Physical sun/moon mode: draw simple discs so they are always visible (position from physics via sun_direction)
+        let sun_disk_simple = smoothstep(0.998, 0.9995, sun_dot);
+        let sun_glow_simple = pow(max(sun_dot, 0.0), 12.0) * 0.5;
+        sky_color += sky.sun_color.rgb * (sun_disk_simple * 6.0 + sun_glow_simple) * max(sun_intensity, 0.3);
+        let moon_dir = normalize(vec3<f32>(-sun_dir.x, max(0.12, -sun_dir.y * 0.6 + 0.2), -sun_dir.z));
+        let moon_dot = dot(view_dir, moon_dir);
+        if (moon_dot > 0.0 && space_blend < 0.9) {
+            let moon_disk_simple = smoothstep(0.9992, 0.9998, moon_dot);
+            let moon_glow_simple = pow(max(moon_dot, 0.0), 40.0) * 0.15;
+            let moon_vis = smoothstep(0.1, 0.4, night_factor) * (1.0 - cloud_density * 0.5);
+            sky_color += vec3<f32>(0.62, 0.65, 0.75) * (moon_disk_simple * 2.5 + moon_glow_simple) * moon_vis;
+        }
     }
 
     // ===== ATMOSPHERIC SCATTERING / SUNSET =====
@@ -535,37 +551,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         sky_color += vec3<f32>(0.15, 0.08, 0.25) * anti_glow * horizon_proximity;
     }
 
-    // ===== MOON (realistic with phases, crater detail, earthshine) =====
-    // Moon opposite sun; time/100 = time_of_day for phase (full at midnight, new at noon)
-    let time_of_day = time * 0.01;
-    let moon_dir = normalize(vec3<f32>(-sun_dir.x, max(0.15, -sun_dir.y * 0.7 + 0.25), -sun_dir.z));
-    let moon_dot = dot(view_dir, moon_dir);
-    // Phase from time: full at dawn (t=0), new at dusk (t=0.5)
-    let moon_sun_dot = cos((time_of_day - 0.5) * TAU); // -1 (full) to 1 (new)
+    // ===== MOON (realistic with phases, crater detail, earthshine) — skip when using physical moon(s) =====
+    if (sky.skip_procedural_sun_moon.x < 0.5) {
+        // Moon opposite sun; time/100 = time_of_day for phase (full at midnight, new at noon)
+        let time_of_day = time * 0.01;
+        let moon_dir = normalize(vec3<f32>(-sun_dir.x, max(0.15, -sun_dir.y * 0.7 + 0.25), -sun_dir.z));
+        let moon_dot = dot(view_dir, moon_dir);
+        // Phase from time: full at dawn (t=0), new at dusk (t=0.5)
+        let moon_sun_dot = cos((time_of_day - 0.5) * TAU); // -1 (full) to 1 (new)
 
-    if (moon_dot > 0.0 && space_blend < 0.85) {
-        let moon_disk = smoothstep(0.9994, 0.99992, moon_dot);
-        if (moon_disk > 0.0) {
-            // Crater detail (maria + highlands)
-            let moon_uv = view_dir * 180.0;
-            let craters = fbm(moon_uv, 4) * 0.25;
-            let maria = smoothstep(0.45, 0.55, fbm(moon_uv * 0.5, 3));
-            let moon_base = vec3<f32>(0.68, 0.70, 0.76);
-            let moon_dark = vec3<f32>(0.35, 0.38, 0.45); // Maria
-            var moon_surface = mix(moon_base, moon_dark, maria * 0.4);
-            moon_surface *= (0.85 + craters);
+        if (moon_dot > 0.0 && space_blend < 0.85) {
+            let moon_disk = smoothstep(0.9994, 0.99992, moon_dot);
+            if (moon_disk > 0.0) {
+                // Crater detail (maria + highlands)
+                let moon_uv = view_dir * 180.0;
+                let craters = fbm(moon_uv, 4) * 0.25;
+                let maria = smoothstep(0.45, 0.55, fbm(moon_uv * 0.5, 3));
+                let moon_base = vec3<f32>(0.68, 0.70, 0.76);
+                let moon_dark = vec3<f32>(0.35, 0.38, 0.45); // Maria
+                var moon_surface = mix(moon_base, moon_dark, maria * 0.4);
+                moon_surface *= (0.85 + craters);
 
-            // Phase shading: full when moon opposite sun, crescent/new when same side
-            let phase_lit = 1.0 - smoothstep(-0.2, 0.85, moon_sun_dot); // Lit portion (1=full, 0=new)
-            let moon_lit = mix(moon_surface * 0.12, moon_surface, phase_lit); // Dark side faint (earthshine)
-            sky_color = mix(sky_color, moon_lit, moon_disk);
+                // Phase shading: full when moon opposite sun, crescent/new when same side
+                let phase_lit = 1.0 - smoothstep(-0.2, 0.85, moon_sun_dot); // Lit portion (1=full, 0=new)
+                let moon_lit = mix(moon_surface * 0.12, moon_surface, phase_lit); // Dark side faint (earthshine)
+                sky_color = mix(sky_color, moon_lit, moon_disk);
+            }
+
+            let moon_glow = pow(max(moon_dot, 0.0), 90.0) * 0.22;
+            let moon_halo = pow(max(moon_dot, 0.0), 18.0) * 0.06;
+            let moon_color = vec3<f32>(0.5, 0.55, 0.75);
+            let moon_vis = smoothstep(0.15, 0.45, night_factor) * (1.0 - cloud_density * 0.5);
+            sky_color += moon_color * (moon_glow + moon_halo) * moon_vis;
         }
-
-        let moon_glow = pow(max(moon_dot, 0.0), 90.0) * 0.22;
-        let moon_halo = pow(max(moon_dot, 0.0), 18.0) * 0.06;
-        let moon_color = vec3<f32>(0.5, 0.55, 0.75);
-        let moon_vis = smoothstep(0.15, 0.45, night_factor) * (1.0 - cloud_density * 0.5);
-        sky_color += moon_color * (moon_glow + moon_halo) * moon_vis;
     }
 
     // ===== CLOUDS =====
@@ -707,8 +725,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // ===== SECOND SUN (alien planets) =====
-    if (planet_type > 0.5) {
+    // ===== SECOND SUN (alien planets) — skip when using physical sun =====
+    if (planet_type > 0.5 && sky.skip_procedural_sun_moon.x < 0.5) {
         let sun2_dir = normalize(vec3<f32>(-sun_dir.x, sun_dir.y * 0.5 + 0.1, -sun_dir.z));
         let sun2_dot = dot(view_dir, sun2_dir);
         let sun2_disk = smoothstep(0.998, 1.0, sun2_dot);

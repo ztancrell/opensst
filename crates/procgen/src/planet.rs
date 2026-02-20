@@ -65,8 +65,12 @@ pub struct Planet {
     pub has_unknown_intel: bool,
     /// Gravity multiplier (0.85–1.2). Affects jump/fall feel.
     pub gravity_mult: f32,
-    /// Day length multiplier (0.5–2.0). Affects time-of-day cycle.
+    /// Day length multiplier (0.5–2.0). Legacy; prefer rotation_period_sec for day/night.
     pub day_length_mult: f32,
+    /// Rotation period in real-time seconds (one full day). Unique per planet.
+    pub rotation_period_sec: f32,
+    /// Initial rotation phase in radians (0..TAU). Seed-based so each planet has different starting time of day.
+    pub rotation_phase_0: f32,
 }
 
 /// Planet size categories.
@@ -122,6 +126,8 @@ impl Planet {
             has_unknown_intel: false,
             gravity_mult: 1.0,
             day_length_mult: 1.0,
+            rotation_period_sec: 900.0,  // 15 min day (Earth-like feel, not too long)
+            rotation_phase_0: 0.0,
         }
     }
 
@@ -215,6 +221,9 @@ impl Planet {
         // Gravity and day length: random so each world feels different
         let gravity_mult = 0.85 + rng.gen::<f32>() * 0.35;
         let day_length_mult = 0.5 + rng.gen::<f32>() * 1.5;
+        // Real-time day/night: rotation period 5–30 min, unique phase per planet
+        let rotation_period_sec = 300.0 + rng.gen::<f32>() * 1500.0; // 5–30 min
+        let rotation_phase_0 = rng.gen::<f32>() * std::f32::consts::TAU;
 
         Self {
             seed,
@@ -234,6 +243,8 @@ impl Planet {
             has_unknown_intel,
             gravity_mult,
             day_length_mult,
+            rotation_period_sec,
+            rotation_phase_0,
         }
     }
 
